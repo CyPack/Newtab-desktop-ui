@@ -25,7 +25,7 @@ If you find this extension useful, consider [buying me a coffee](https://buymeac
 
 ## Installation
 
-[(YT VIDEO) How to Install and Use New Tab Desktop UI?](https://www.youtube.com/watch?v=I-3GmfDBz4M)
+[(YT VIDEO) How to Use New Tab Desktop UI?](https://www.youtube.com/watch?v=I-3GmfDBz4M)
 
 ### Clone the repo
 
