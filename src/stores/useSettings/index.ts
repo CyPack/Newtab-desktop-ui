@@ -549,6 +549,12 @@ export const settings = makeAutoObservable({
             settings._restoreWallpaper(backup.wallpaper);
           }
           
+          // Save original grid dimensions for migration (index → row/col needs original column count)
+          if (backup.gridDimensions && typeof backup.gridDimensions.cols === 'number' && backup.gridDimensions.cols > 0) {
+            localStorage.setItem('migration-grid-cols', String(backup.gridDimensions.cols));
+            console.log('Saved migration grid cols from backup:', backup.gridDimensions.cols);
+          }
+
           if (Object.prototype.hasOwnProperty.call(backup, "panelBookmarks") && Array.isArray(backup.panelBookmarks)) {
             console.log('Restoring panel bookmarks directly to Bookmarks Bar:', backup.panelBookmarks.length, 'items');
             

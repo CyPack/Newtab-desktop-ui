@@ -79,6 +79,34 @@ function loadPanelBookmarks(): any[] {
   }
 }
 
+// Coordinate helpers for (row, col) grid positioning
+function coordToKey(row: number, col: number): string {
+  return `${row},${col}`;
+}
+
+function migrateIndexToRowCol(bookmarksList: any[], cols: number): any[] {
+  const safeCols = cols > 0 ? cols : 10;
+  let nextFallbackIndex = 0;
+  // Find the highest existing index to start fallback from
+  bookmarksList.forEach(bm => {
+    if (bm.panel === "full-screen-panel" && typeof bm.index === "number") {
+      nextFallbackIndex = Math.max(nextFallbackIndex, bm.index + 1);
+    }
+  });
+
+  return bookmarksList.map(bm => {
+    if (bm.panel === "full-screen-panel" && bm.row === undefined && bm.col === undefined) {
+      const idx = typeof bm.index === "number" ? bm.index : nextFallbackIndex++;
+      return {
+        ...bm,
+        row: Math.max(0, Math.floor(idx / safeCols)),
+        col: Math.max(0, idx % safeCols),
+      };
+    }
+    return bm;
+  });
+}
+
 let saveTimeout: NodeJS.Timeout | null = null;
 
 function debouncedSavePanelBookmarks(panelBookmarks: any[]) {
@@ -159,11 +187,11 @@ export const Grid = observer(function Grid() {
          : 4;
   });
   const [gridDimensions, setGridDimensions] = useState({ cols: 10, rows: 6 });
-  const [targetSlotIndex, setTargetSlotIndex] = useState<number | null>(null);
+  const [targetSlotIndex, setTargetSlotIndex] = useState<{ row: number; col: number } | null>(null);
 
   // Refs for drag state
   const targetPanelRef = useRef<string | null>(null);
-  const draggedRef = useRef<{ id: string; panel: string; index: number } | null>(null);
+  const draggedRef = useRef<{ id: string; panel: string; index: number; row?: number; col?: number } | null>(null);
   const dragImageRef = useRef<HTMLElement | null>(null);
 
   const isRootSafe = useMemo(() => {
@@ -213,67 +241,95 @@ export const Grid = observer(function Grid() {
     return panelItems.length === 0 ? 0 : Math.max(...panelItems.map(bm => bm.index ?? 0)) + 1;
   }, [panelBookmarks]);
 
-  const findEmptySlot = useCallback((bookmarks: any[], totalSlots: number): number => {
-    const occupiedSlots = new Set(
-      bookmarks
-        .filter((b) => b.panel === "full-screen-panel")
-        .map((b) => b.index)
-        .filter((index) => index !== undefined && index !== null)
+  const findEmptySlot = useCallback((bms: any[], cols: number, rows: number): { row: number; col: number } => {
+    const occupied = new Set<string>(
+      bms
+        .filter(b => b.panel === "full-screen-panel" && b.row !== undefined && b.col !== undefined)
+        .map(b => coordToKey(b.row, b.col))
     );
-    
-    for (let i = 0; i < totalSlots; i++) {
-      if (!occupiedSlots.has(i)) {
-        return i;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (!occupied.has(coordToKey(r, c))) return { row: r, col: c };
       }
     }
-    
-    return totalSlots - 1;
+    return { row: rows, col: 0 };
   }, []);
 
-  const getNextAvailableIndexes = useCallback((existingBookmarks: any[], totalSlots: number, count: number): number[] => {
-    const occupiedSlots = new Set(
+  const getNextAvailableCoords = useCallback((existingBookmarks: any[], cols: number, rows: number, count: number): { row: number; col: number }[] => {
+    const occupied = new Set<string>(
       existingBookmarks
-        .filter((b) => b.panel === "full-screen-panel")
-        .map((b) => b.index)
-        .filter((index) => index !== undefined && index !== null)
+        .filter(b => b.panel === "full-screen-panel" && b.row !== undefined && b.col !== undefined)
+        .map(b => coordToKey(b.row, b.col))
     );
-    
-    const availableIndexes: number[] = [];
-    for (let i = 0; i < totalSlots && availableIndexes.length < count; i++) {
-      if (!occupiedSlots.has(i)) {
-        availableIndexes.push(i);
+    const available: { row: number; col: number }[] = [];
+    for (let r = 0; r < rows && available.length < count; r++) {
+      for (let c = 0; c < cols && available.length < count; c++) {
+        if (!occupied.has(coordToKey(r, c))) available.push({ row: r, col: c });
       }
     }
-    
-    return availableIndexes;
+    let extraRow = rows;
+    while (available.length < count) {
+      for (let c = 0; c < cols && available.length < count; c++) {
+        available.push({ row: extraRow, col: c });
+      }
+      extraRow++;
+    }
+    return available;
   }, []);
 
-  // Calculate grid dimensions
+  // Calculate grid dimensions using CSS-consistent em-based values
   const calculateGridDimensions = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
-    
-    const screenWidth = window.innerWidth;
-    const screenHeight = window.innerHeight;
-    const padding = 40;
-    const gap = 8;
-    
-    let dialSize = 60;
-    if (settings.dialSize === "small") dialSize = 50;
-    else if (settings.dialSize === "medium") dialSize = 60;
-    else if (settings.dialSize === "large") dialSize = 80;
-    else if (settings.dialSize === "extra-large") dialSize = 100;
-    
-    const availableWidth = screenWidth - padding;
-    const availableHeight = screenHeight - padding - 120;
-    
-    const cols = Math.floor((availableWidth + gap) / (dialSize + gap));
-    const rows = Math.floor((availableHeight + gap) / (dialSize + gap));
-    
-    setGridDimensions({ 
-      cols: Math.max(cols, 5),
-      rows: Math.max(rows, 4)
-    });
-  }, [settings.dialSize, settings.gridLayout]);
+
+    const dialWidthValue = settings.squareDials ? 10.25 : 12.125;
+    const gridGapValue = 1.75;
+    const padding = 20; // matches renderFullScreenPanel inline padding
+
+    const gridEl = bottomFullGridRef.current;
+    if (gridEl) {
+      // DOM-based calculation (preferred - reads actual rendered sizes)
+      const computedStyle = getComputedStyle(gridEl);
+      const fontSize = parseFloat(computedStyle.fontSize) || 16;
+      const dialWidth = dialWidthValue * fontSize;
+      const gridGap = parseFloat(computedStyle.columnGap || computedStyle.gap) || (gridGapValue * fontSize);
+      const paddingLeft = parseFloat(computedStyle.paddingLeft) || padding;
+      const paddingRight = parseFloat(computedStyle.paddingRight) || padding;
+      const paddingTop = parseFloat(computedStyle.paddingTop) || padding;
+      const paddingBottom = parseFloat(computedStyle.paddingBottom) || padding;
+
+      const containerWidth = gridEl.clientWidth - paddingLeft - paddingRight;
+      const containerHeight = gridEl.clientHeight - paddingTop - paddingBottom;
+
+      const cols = Math.max(Math.floor((containerWidth + gridGap) / (dialWidth + gridGap)), 3);
+      const rows = Math.max(Math.floor((containerHeight + gridGap) / (dialWidth + gridGap)), 3);
+
+      setGridDimensions(prev =>
+        prev.cols === cols && prev.rows === rows ? prev : { cols, rows }
+      );
+      return;
+    }
+
+    // Fallback: CSS-consistent em-based calculation (before first render)
+    const baseFontSize = 16;
+    const sizeMultipliers: Record<string, number> = {
+      "extra-tiny": 0.3, "tiny": 0.4, "small": 0.5,
+      "medium": 0.6, "large": 0.7, "huge": 0.8, "scale": 0.5,
+    };
+    const multiplier = sizeMultipliers[settings.dialSize as string] || 0.4;
+    const effectiveFontSize = baseFontSize * multiplier;
+    const dialWidth = dialWidthValue * effectiveFontSize;
+    const gridGap = gridGapValue * effectiveFontSize;
+
+    const availableWidth = window.innerWidth - (padding * 2);
+    const availableHeight = window.innerHeight - (padding * 2);
+
+    const cols = Math.max(Math.floor((availableWidth + gridGap) / (dialWidth + gridGap)), 3);
+    const rows = Math.max(Math.floor((availableHeight + gridGap) / (dialWidth + gridGap)), 3);
+
+    setGridDimensions(prev =>
+      prev.cols === cols && prev.rows === rows ? prev : { cols, rows }
+    );
+  }, [settings.dialSize, settings.gridLayout, settings.squareDials]);
 
   // Organize bookmarks for layout
   const organizeBookmarksForLayout = useCallback(
@@ -285,24 +341,35 @@ export const Grid = observer(function Grid() {
       let migrated: any[] = [];
       
       if (targetLayout === "full-screen") {
-        const totalSlots = gridDimensions.cols * gridDimensions.rows;
-        
-        migrated = bookmarkList.map((bm, globalIndex) => ({
-          ...bm,
-          panel: "full-screen-panel",
-          index: bm.panel === "full-screen-panel" && bm.index !== undefined ? bm.index : globalIndex
-        }));
+        const { cols, rows } = gridDimensions;
 
-        const indexMap = new Map();
-        migrated.forEach(bm => {
-          if (indexMap.has(bm.index)) {
-            let newIndex = 0;
-            while (indexMap.has(newIndex) && newIndex < totalSlots) {
-              newIndex++;
-            }
-            bm.index = newIndex;
+        migrated = bookmarkList.map((bm, globalIndex) => {
+          if (bm.panel === "full-screen-panel" && bm.row !== undefined && bm.col !== undefined) {
+            return { ...bm, panel: "full-screen-panel" };
           }
-          indexMap.set(bm.index, bm.id);
+          const idx = (bm.panel === "full-screen-panel" && bm.index !== undefined) ? bm.index : globalIndex;
+          return {
+            ...bm,
+            panel: "full-screen-panel",
+            row: Math.floor(idx / cols),
+            col: idx % cols,
+          };
+        });
+
+        // Deduplicate: resolve coordinate conflicts
+        const coordMap = new Map<string, string>(); // "row,col" -> bookmark id
+        migrated.forEach(bm => {
+          if (bm.panel !== "full-screen-panel") return;
+          const key = coordToKey(bm.row, bm.col);
+          if (coordMap.has(key)) {
+            // Build occupied set from coordMap (all previously assigned positions)
+            const occupiedBookmarks = migrated
+              .filter(m => m.panel === "full-screen-panel" && coordMap.has(coordToKey(m.row, m.col)));
+            const empty = findEmptySlot(occupiedBookmarks, cols, rows);
+            bm.row = empty.row;
+            bm.col = empty.col;
+          }
+          coordMap.set(coordToKey(bm.row, bm.col), bm.id);
         });
       } else {
         const panelOrder: PanelName[] = 
@@ -367,14 +434,15 @@ export const Grid = observer(function Grid() {
       
       if (browserBookmarks.length > 0) {
         if (targetLayout === "full-screen") {
-          const totalSlots = gridDimensions.cols * gridDimensions.rows;
-          const availableIndexes = getNextAvailableIndexes(migrated, totalSlots, browserBookmarks.length);
-          
-          distributed = browserBookmarks.slice(0, availableIndexes.length).map((bm: any, i: number) => ({
+          const { cols, rows } = gridDimensions;
+          const availableCoords = getNextAvailableCoords(migrated, cols, rows, browserBookmarks.length);
+
+          distributed = browserBookmarks.slice(0, availableCoords.length).map((bm: any, i: number) => ({
             ...bm,
             panel: "full-screen-panel",
             isPanelBookmark: true,
-            index: availableIndexes[i],
+            row: availableCoords[i].row,
+            col: availableCoords[i].col,
             name: bm.title || bm.name,
             title: bm.title || bm.name,
           }));
@@ -408,12 +476,28 @@ export const Grid = observer(function Grid() {
 
       return [...migrated, ...distributed];
     },
-    [gridDimensions, bookmarks, lastOrganizedLayout, hasOrganizedForLayout, getNextAvailableIndexes]
+    [gridDimensions, bookmarks, lastOrganizedLayout, hasOrganizedForLayout, getNextAvailableCoords, findEmptySlot]
   );
 
   // Effects
   useEffect(() => {
     calculateGridDimensions();
+
+    const gridEl = bottomFullGridRef.current;
+    if (gridEl && typeof ResizeObserver !== 'undefined') {
+      let rafId: number;
+      const observer = new ResizeObserver(() => {
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => calculateGridDimensions());
+      });
+      observer.observe(gridEl);
+      return () => {
+        cancelAnimationFrame(rafId);
+        observer.disconnect();
+      };
+    }
+
+    // Fallback for pre-render or no ResizeObserver
     window.addEventListener("resize", calculateGridDimensions);
     return () => window.removeEventListener("resize", calculateGridDimensions);
   }, [calculateGridDimensions]);
@@ -506,8 +590,8 @@ export const Grid = observer(function Grid() {
         setActivePanel(b.panel);
         targetPanelRef.current = b.panel;
         
-        if (b.panel === "full-screen-panel" && b.index !== undefined) {
-          setTargetSlotIndex(b.index);
+        if (b.panel === "full-screen-panel" && b.row !== undefined && b.col !== undefined) {
+          setTargetSlotIndex({ row: b.row, col: b.col });
         }
         
         modals.editingBookmarkId = id;
@@ -553,7 +637,7 @@ export const Grid = observer(function Grid() {
       },
       getNextIndexForPanel: getNextIndexForPanel,
       getCurrentTargetSlot: () => targetSlotIndex,
-      setCurrentTargetSlot: (slotIndex: number) => setTargetSlotIndex(slotIndex),
+      setCurrentTargetSlot: (slot: { row: number; col: number }) => setTargetSlotIndex(slot),
       clearCurrentTargetSlot: () => setTargetSlotIndex(null),
       
       // Export panel bookmarks for backup
@@ -581,32 +665,33 @@ export const Grid = observer(function Grid() {
             title: data.title,
             parentId: bookmarksBarId,
           });
-          
-          let nextIndex: number;
-          if (data.panel === "full-screen-panel") {
-            if (targetSlotIndex !== null) {
-              nextIndex = targetSlotIndex;
-              setTargetSlotIndex(null);
-            } else {
-              nextIndex = findEmptySlot(panelBookmarks, gridDimensions.cols * gridDimensions.rows);
-            }
-          } else {
-            nextIndex = getNextIndexForPanel(data.panel);
-          }
-          
-          const panelBookmarkEntry = {
+
+          const panelBookmarkEntry: any = {
             name: data.title,
             title: data.title,
             type: "bookmark" as const,
-            index: nextIndex,
             url: normalizedUrl,
             panel: data.panel,
             id: newBookmark.id,
             isPanelBookmark: true,
           };
-          
+
+          if (data.panel === "full-screen-panel") {
+            let coord: { row: number; col: number };
+            if (targetSlotIndex !== null) {
+              coord = targetSlotIndex;
+              setTargetSlotIndex(null);
+            } else {
+              coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+            }
+            panelBookmarkEntry.row = coord.row;
+            panelBookmarkEntry.col = coord.col;
+          } else {
+            panelBookmarkEntry.index = getNextIndexForPanel(data.panel);
+          }
+
           updatePanelBookmarksWithSave((current) => [...current, panelBookmarkEntry]);
-          
+
           return newBookmark;
         } catch (error) {
           throw error;
@@ -620,31 +705,32 @@ export const Grid = observer(function Grid() {
             title: data.title,
             parentId: bookmarksBarId,
           });
-          
-          let nextIndex: number;
-          if (data.panel === "full-screen-panel") {
-            if (targetSlotIndex !== null) {
-              nextIndex = targetSlotIndex;
-              setTargetSlotIndex(null);
-            } else {
-              nextIndex = findEmptySlot(panelBookmarks, gridDimensions.cols * gridDimensions.rows);
-            }
-          } else {
-            nextIndex = getNextIndexForPanel(data.panel);
-          }
-          
-          const panelFolderEntry = {
+
+          const panelFolderEntry: any = {
             name: data.title,
             title: data.title,
             type: "folder" as const,
-            index: nextIndex,
             panel: data.panel,
             id: newFolder.id,
             isPanelBookmark: true,
           };
-          
+
+          if (data.panel === "full-screen-panel") {
+            let coord: { row: number; col: number };
+            if (targetSlotIndex !== null) {
+              coord = targetSlotIndex;
+              setTargetSlotIndex(null);
+            } else {
+              coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+            }
+            panelFolderEntry.row = coord.row;
+            panelFolderEntry.col = coord.col;
+          } else {
+            panelFolderEntry.index = getNextIndexForPanel(data.panel);
+          }
+
           updatePanelBookmarksWithSave((current) => [...current, panelFolderEntry]);
-          
+
           return newFolder;
         } catch (error) {
           throw error;
@@ -677,8 +763,26 @@ export const Grid = observer(function Grid() {
         setPanelBookmarks(folderBookmarksWithPanels);
         return;
       } else if (isRootSafe) {
-        const savedPanelBookmarks = loadPanelBookmarks();
-        
+        let savedPanelBookmarks = loadPanelBookmarks();
+
+        // Migrate legacy flat-index to (row, col) for full-screen bookmarks
+        const hasFsLegacy = savedPanelBookmarks.some(
+          bm => bm.panel === "full-screen-panel" && bm.row === undefined && bm.col === undefined
+        );
+        if (hasFsLegacy) {
+          // Use original column count from backup restore if available,
+          // otherwise fall back to current viewport calculation
+          const storedCols = parseInt(localStorage.getItem('migration-grid-cols') || '0');
+          const migrationCols = storedCols > 0 ? storedCols : gridDimensions.cols;
+          savedPanelBookmarks = migrateIndexToRowCol(savedPanelBookmarks, migrationCols);
+          savePanelBookmarks(savedPanelBookmarks);
+          // Clean up migration hint after use
+          if (storedCols > 0) {
+            localStorage.removeItem('migration-grid-cols');
+          }
+          console.log(`Migrated full-screen bookmarks from index to (row, col) using cols=${migrationCols}${storedCols > 0 ? ' (from backup)' : ' (current viewport)'}`);
+        }
+
         if (savedPanelBookmarks.length === 0) {
           const currentFolderBookmarks = ((bookmarks as any).bookmarks || []).filter(
             (bm: any) => bm.parentId === bookmarks.currentFolder.id
@@ -736,19 +840,19 @@ export const Grid = observer(function Grid() {
         
         if (newBrowserBookmarks.length > 0) {
           if (settings.gridLayout === "full-screen") {
-            const totalSlots = gridDimensions.cols * gridDimensions.rows;
-            const availableIndexes = getNextAvailableIndexes(finalBookmarks, totalSlots, newBrowserBookmarks.length);
-            
-            const newPanelBookmarks = newBrowserBookmarks.slice(0, availableIndexes.length).map((bm: any, i: number) => ({
+            const availableCoords = getNextAvailableCoords(finalBookmarks, gridDimensions.cols, gridDimensions.rows, newBrowserBookmarks.length);
+
+            const newPanelBookmarks = newBrowserBookmarks.slice(0, availableCoords.length).map((bm: any, i: number) => ({
               ...bm,
               panel: "full-screen-panel",
               isPanelBookmark: true,
-              index: availableIndexes[i],
+              row: availableCoords[i].row,
+              col: availableCoords[i].col,
               name: bm.title || bm.name,
               title: bm.title || bm.name,
               url: bm.url ? normalizeUrl(bm.url) : bm.url,
             }));
-            
+
             finalBookmarks = [...finalBookmarks, ...newPanelBookmarks];
           } else {
             const panelOrder: PanelName[] = 
@@ -818,7 +922,7 @@ export const Grid = observer(function Grid() {
   bookmarks.bookmarks,
   organizeBookmarksForLayout,
   gridDimensions,
-  getNextAvailableIndexes
+  getNextAvailableCoords
 ]);
 
 useEffect(() => {
@@ -847,21 +951,28 @@ useEffect(() => {
 
   const handleBookmarkCreated = async (id: string, bookmark: any) => {
     if (bookmark.parentId === bookmarks.currentFolder?.id && bookmark.type === 'bookmark') {
-      const newPanelBookmark = {
+      const newPanelBookmark: any = {
         ...bookmark,
         name: bookmark.title || bookmark.name,
         title: bookmark.title || bookmark.name,
         url: bookmark.url ? normalizeUrl(bookmark.url) : bookmark.url,
-        panel: "top-left",
-        index: getNextIndexForPanel("top-left"),
         isPanelBookmark: true,
-        type: "bookmark"
+        type: "bookmark",
       };
+
+      if (settings.gridLayout === "full-screen") {
+        const coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+        newPanelBookmark.panel = "full-screen-panel";
+        newPanelBookmark.row = coord.row;
+        newPanelBookmark.col = coord.col;
+      } else {
+        newPanelBookmark.panel = "top-left";
+        newPanelBookmark.index = getNextIndexForPanel("top-left");
+      }
 
       updatePanelBookmarksWithSave((current) => {
         const exists = current.some(bm => bm.id === id);
         if (exists) return current;
-        
         return [...current, newPanelBookmark];
       });
     }
@@ -896,7 +1007,7 @@ useEffect(() => {
   return () => {
     listeners.forEach(cleanup => cleanup());
   };
-}, [isRootSafe, bookmarks.currentFolder?.id, getNextIndexForPanel, updatePanelBookmarksWithSave]);
+}, [isRootSafe, bookmarks.currentFolder?.id, getNextIndexForPanel, updatePanelBookmarksWithSave, findEmptySlot, gridDimensions, panelBookmarks, settings.gridLayout]);
 
   useEffect(() => {
     const newPanelCount = settings.gridLayout === "2-panel" ? 2 
@@ -1031,8 +1142,12 @@ useEffect(() => {
 
   // Drag handlers
   const handleDragStart = useCallback(
-    (e: React.DragEvent, panel: string, index: number, id: string) => {
-      draggedRef.current = { id, panel, index };
+    (e: React.DragEvent, panel: string, indexOrCoord: number | { row: number; col: number }, id: string) => {
+      if (panel === "full-screen-panel" && typeof indexOrCoord === "object") {
+        draggedRef.current = { id, panel, index: -1, row: indexOrCoord.row, col: indexOrCoord.col };
+      } else {
+        draggedRef.current = { id, panel, index: indexOrCoord as number };
+      }
       e.dataTransfer.effectAllowed = "move";
       try { e.dataTransfer.setData("text/plain", ""); } catch {}
 
@@ -1196,21 +1311,20 @@ useEffect(() => {
                               originalPanel;
       
       if (draggedBookmark) {
-        let nextIndex: number;
-        if (currentFolderPanel === "full-screen-panel") {
-          const totalSlots = gridDimensions.cols * gridDimensions.rows;
-          nextIndex = findEmptySlot(loadPanelBookmarks(), totalSlots);
-        } else {
-          nextIndex = getNextIndexForPanel(currentFolderPanel);
-        }
-        
-        const panelBookmarkEntry = {
+        const panelBookmarkEntry: any = {
           ...draggedBookmark,
           panel: currentFolderPanel,
           isPanelBookmark: true,
-          index: nextIndex,
         };
-        
+
+        if (currentFolderPanel === "full-screen-panel") {
+          const coord = findEmptySlot(loadPanelBookmarks(), gridDimensions.cols, gridDimensions.rows);
+          panelBookmarkEntry.row = coord.row;
+          panelBookmarkEntry.col = coord.col;
+        } else {
+          panelBookmarkEntry.index = getNextIndexForPanel(currentFolderPanel);
+        }
+
         const savedPanelBookmarks = loadPanelBookmarks();
         const updatedSavedBookmarks = [...savedPanelBookmarks, panelBookmarkEntry];
         savePanelBookmarks(updatedSavedBookmarks);
@@ -1232,52 +1346,55 @@ useEffect(() => {
         moveBookmarkToFolder(d.id, targetId);
       }
     } else {
+      const safeIndex = Math.max(0, d.index);
       if (d.panel === targetPanel) {
-        reorderWithinPanel(targetPanel, d.index, targetIndex);
+        reorderWithinPanel(targetPanel, safeIndex, targetIndex);
       } else {
-        moveAcrossPanels(d.panel, d.index, targetPanel, targetIndex);
+        moveAcrossPanels(d.panel, safeIndex, targetPanel, targetIndex);
       }
     }
 
     draggedRef.current = null;
   }, [reorderWithinPanel, moveAcrossPanels, moveBookmarkToFolder, clearAllDragStyles]);
 
-  const handleDropOnSlot = useCallback((e: React.DragEvent, targetSlotIndex: number) => {
+  const handleDropOnSlot = useCallback((e: React.DragEvent, targetRow: number, targetCol: number) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     const d = draggedRef.current;
     if (!d) return;
 
     clearAllDragStyles();
 
-    if (d.panel === "full-screen-panel" && d.index === targetSlotIndex) {
+    if (d.panel === "full-screen-panel" && d.row === targetRow && d.col === targetCol) {
       draggedRef.current = null;
       return;
     }
 
     updatePanelBookmarksWithSave((currentBookmarks) => {
-      const fullScreenBookmarks = currentBookmarks.filter(b => b.panel === "full-screen-panel");
-      const targetBookmark = fullScreenBookmarks.find(b => b.index === targetSlotIndex);
+      const targetBookmark = currentBookmarks.find(
+        b => b.panel === "full-screen-panel" && b.row === targetRow && b.col === targetCol
+      );
 
-      const newBookmarks = currentBookmarks.map(bookmark => {
+      return currentBookmarks.map(bookmark => {
         if (bookmark.id === d.id) {
-          return { ...bookmark, panel: "full-screen-panel", index: targetSlotIndex };
+          return { ...bookmark, panel: "full-screen-panel", row: targetRow, col: targetCol };
         }
         if (targetBookmark && bookmark.id === targetBookmark.id) {
           if (d.panel === "full-screen-panel") {
-            return { ...bookmark, index: d.index };
+            return { ...bookmark, row: d.row!, col: d.col! };
           } else {
-            const emptySlot = findEmptySlot(currentBookmarks.filter(b => b.id !== d.id), gridDimensions.cols * gridDimensions.rows);
-            return { ...bookmark, index: emptySlot };
+            const empty = findEmptySlot(
+              currentBookmarks.filter(b => b.id !== d.id),
+              gridDimensions.cols, gridDimensions.rows
+            );
+            return { ...bookmark, row: empty.row, col: empty.col };
           }
         }
         return bookmark;
       });
-
-      return newBookmarks;
     });
-    
+
     draggedRef.current = null;
   }, [clearAllDragStyles, gridDimensions, findEmptySlot, updatePanelBookmarksWithSave]);
 
@@ -1291,17 +1408,13 @@ useEffect(() => {
     clearAllDragStyles();
 
     if (targetPanel === "full-screen-panel") {
-      const totalSlots = gridDimensions.cols * gridDimensions.rows;
-      const emptySlot = findEmptySlot(panelBookmarks, totalSlots);
-      
       updatePanelBookmarksWithSave((current) => {
-        const next = current.map(bookmark => 
-          bookmark.id === d.id 
-            ? { ...bookmark, panel: "full-screen-panel", index: emptySlot }
+        const empty = findEmptySlot(current, gridDimensions.cols, gridDimensions.rows);
+        return current.map(bookmark =>
+          bookmark.id === d.id
+            ? { ...bookmark, panel: "full-screen-panel", row: empty.row, col: empty.col }
             : bookmark
         );
-        
-        return next;
       });
     } else {
       const panelItems = panelBookmarks
@@ -1368,16 +1481,20 @@ useEffect(() => {
           url: normalizedUrl,
         });
         
-        updatePanelBookmarksWithSave((current) => 
+        updatePanelBookmarksWithSave((current) =>
           current.map((b) =>
             b.id === modals.editingBookmarkId
-              ? { 
-                  ...b, 
-                  name: data.title, 
-                  title: data.title, 
+              ? {
+                  ...b,
+                  name: data.title,
+                  title: data.title,
                   url: normalizedUrl,
                   panel: data.panel || targetPanel,
-                  index: targetSlotIndex !== null ? targetSlotIndex : b.index
+                  ...(targetPanel === "full-screen-panel" || (data.panel || targetPanel) === "full-screen-panel"
+                    ? (targetSlotIndex !== null
+                        ? { row: targetSlotIndex.row, col: targetSlotIndex.col }
+                        : { row: b.row, col: b.col })
+                    : { index: b.index }),
                 }
               : b
           )
@@ -1392,28 +1509,30 @@ useEffect(() => {
     } else {
       // NEW BOOKMARK
       try {
-        let nextIndex = getNextIndexForPanel(targetPanel);
-        
-        if (targetPanel === "full-screen-panel") {
-          if (targetSlotIndex !== null) {
-            nextIndex = targetSlotIndex;
-            setTargetSlotIndex(null);
-          } else {
-            nextIndex = findEmptySlot(panelBookmarks, gridDimensions.cols * gridDimensions.rows);
-          }
-        }
-
         const tempId = `temp-${Date.now()}-${Math.random()}`;
-        const panelBookmarkEntry = {
+        const panelBookmarkEntry: any = {
           name: data.title,
           title: data.title,
           type: "bookmark" as const,
-          index: nextIndex,
           url: normalizedUrl,
           panel: targetPanel,
           id: tempId,
           isPanelBookmark: true,
         };
+
+        if (targetPanel === "full-screen-panel") {
+          let coord: { row: number; col: number };
+          if (targetSlotIndex !== null) {
+            coord = targetSlotIndex;
+            setTargetSlotIndex(null);
+          } else {
+            coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+          }
+          panelBookmarkEntry.row = coord.row;
+          panelBookmarkEntry.col = coord.col;
+        } else {
+          panelBookmarkEntry.index = getNextIndexForPanel(targetPanel);
+        }
 
         updatePanelBookmarksWithSave((current) => [...current, panelBookmarkEntry]);
 
@@ -1457,10 +1576,16 @@ useEffect(() => {
 
   // Render helpers
   const getBookmarksByPanel = useCallback(
-    (panelName: string) =>
-      panelBookmarks
-        .filter((bm) => bm.panel === panelName)
-        .sort((a, b) => (a.index ?? 0) - (b.index ?? 0)),
+    (panelName: string) => {
+      const filtered = panelBookmarks.filter((bm) => bm.panel === panelName);
+      if (panelName === "full-screen-panel") {
+        return filtered.sort((a, b) => {
+          const rowDiff = (a.row ?? 0) - (b.row ?? 0);
+          return rowDiff !== 0 ? rowDiff : (a.col ?? 0) - (b.col ?? 0);
+        });
+      }
+      return filtered.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    },
     [panelBookmarks]
   );
 
@@ -1566,29 +1691,34 @@ useEffect(() => {
 
   const renderFullScreenPanel = () => {
     const list = getBookmarksByPanel("full-screen-panel");
-    const totalSlots = gridDimensions.cols * gridDimensions.rows;
+    const { cols, rows } = gridDimensions;
 
-    const gridMap = new Array(totalSlots).fill(null);
-    
-    list.forEach((bm) => {
-      const slotIndex = bm.index ?? 0;
-      if (slotIndex >= 0 && slotIndex < totalSlots) {
-        gridMap[slotIndex] = bm;
+    // Build occupied map: "row,col" -> bookmark
+    const occupiedMap = new Map<string, any>();
+    list
+      .filter(bm => bm.row !== undefined && bm.col !== undefined && bm.row < rows && bm.col < cols)
+      .forEach(bm => occupiedMap.set(coordToKey(bm.row, bm.col), bm));
+
+    // Generate all visible cells
+    const cells: { row: number; col: number; bm: any | null }[] = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        cells.push({ row: r, col: c, bm: occupiedMap.get(coordToKey(r, c)) || null });
       }
-    });
+    }
 
-    const handleSlotDoubleClick = (slotIndex: number) => {
-      if (!gridMap[slotIndex]) {
-        setTargetSlotIndex(slotIndex);
+    const handleSlotDoubleClick = (row: number, col: number) => {
+      if (!occupiedMap.has(coordToKey(row, col))) {
+        setTargetSlotIndex({ row, col });
         targetPanelRef.current = "full-screen-panel";
         openModalForPanel("full-screen-panel");
       }
     };
 
-    const handleSlotRightClick = (e: React.MouseEvent, slotIndex: number) => {
+    const handleSlotRightClick = (e: React.MouseEvent, row: number, col: number) => {
       e.preventDefault();
-      if (!gridMap[slotIndex]) {
-        setTargetSlotIndex(slotIndex);
+      if (!occupiedMap.has(coordToKey(row, col))) {
+        setTargetSlotIndex({ row, col });
       }
     };
 
@@ -1598,9 +1728,9 @@ useEffect(() => {
         style={
           {
             display: "grid",
-            gridTemplateColumns: `repeat(${gridDimensions.cols}, 1fr)`,
-            gridTemplateRows: `repeat(${gridDimensions.rows}, 1fr)`,
-            gap: "8px",
+            gridTemplateColumns: `repeat(${cols}, 1fr)`,
+            gridTemplateRows: `repeat(${rows}, 1fr)`,
+            gap: "1.75em",
             overflowX: "hidden",
             overflowY: "hidden",
             height: "100vh",
@@ -1615,12 +1745,15 @@ useEffect(() => {
         onDragLeave={handlePanelDragLeave}
         onDrop={(e) => handleDropOnPanelEnd(e, "full-screen-panel")}
       >
-        {gridMap.map((bm, slotIndex) => (
+        {cells.map(({ row, col, bm }) => (
           <div
-            key={`slot-${slotIndex}`}
+            key={`slot-${row}-${col}`}
             className="grid-slot"
-            data-slot-index={slotIndex}
+            data-slot-row={row}
+            data-slot-col={col}
             style={{
+              gridColumn: col + 1,
+              gridRow: row + 1,
               position: 'relative',
               minHeight: '60px',
               minWidth: '60px',
@@ -1649,19 +1782,20 @@ useEffect(() => {
               e.preventDefault();
               e.stopPropagation();
               e.currentTarget.classList.remove('drag-over-slot');
-              handleDropOnSlot(e, slotIndex);
+              handleDropOnSlot(e, row, col);
             }}
-            onDoubleClick={() => handleSlotDoubleClick(slotIndex)}
-            onContextMenu={(e) => handleSlotRightClick(e, slotIndex)}
+            onDoubleClick={() => handleSlotDoubleClick(row, col)}
+            onContextMenu={(e) => handleSlotRightClick(e, row, col)}
           >
             {bm && (
               <div
                 data-id={bm.id}
                 data-type={bm.type}
-                data-current-slot={slotIndex}
+                data-current-row={row}
+                data-current-col={col}
                 draggable
                 onDragStart={(e) => {
-                  handleDragStart(e, "full-screen-panel", slotIndex, bm.id);
+                  handleDragStart(e, "full-screen-panel", { row, col }, bm.id);
                 }}
                 onDragEnd={handleDragEnd}
                 style={{
