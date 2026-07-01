@@ -65,8 +65,12 @@
 .Box {
   background-color: rgba(240, 240, 240, 0.2) !important;
   border-radius: 12px !important;
-  width: 48px;
-  height: 48px;
+  /* em-based so the icon scales with the .Grid font-size cascade
+     (dial size + .scale clamp). Was hardcoded 48px which froze icon
+     sizing across viewports. 0.62 * dial-width preserves the prior
+     ~48px look at the default (tiny) size. */
+  width: calc(var(--dial-width) * 0.62);
+  height: calc(var(--dial-width) * 0.62);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -100,6 +104,7 @@
 }
 
 .square .Box {
+  width: var(--dial-height-attached-title);
   height: var(--dial-height-attached-title);
 }
 
