@@ -144,6 +144,43 @@ gerekli ama TEK BAŞINA yetmez — `.Box` em-fix çekirdek. Bu değişiklik GÖR
 - Çekirdek `.Box` em-fix + görsel doğrulama: ORCHESTRATOR (Claude) — GLM screenshot göremiyor.
 - Baseline: 34 önceden-var tsc hatası (dokunma) · `npm run build` YEŞİL (gerçek kapı).
 
+## ✅ UYGULANAN ÇÖZÜM (2026-07-01, feat/responsive-dial-scaling)
+
+**Felsefe (kullanıcı, kesin):** MIN limit YOK · MAX limit VAR. Dial-size seçimi = MAX'ı belirler.
+Ekran küçüldükçe ikonlar orantılı küçülür ve HER ZAMAN görünür (asla gizlenmez/kesilmez).
+
+**Commit'ler (PR #2 `f4aef60` üzerine, branch feat/responsive-dial-scaling):**
+1. `d7a20de` — Task 1 (GLM): settings `limitDialScale`/`maxDialScale` + CSS `.scale` clamp bounds → custom property.
+2. `eb5584a` — Çekirdek (Claude): `.Box` sabit 48px → `calc(var(--dial-width)*0.62)` (em, ölçeklenir) + `.square .Box` kare.
+3. `f337752` — Task 2 (GLM): SettingsContent "Maximum Scale Limit" grubu (toggle + slider + canlı örnek ikon) + tip cast fix.
+4. `6d39310` — Çekirdek yeniden-mimari (Claude): full-screen **fit-all** sizing.
+
+**fit-all algoritması (`calculateGridDimensions`, full-screen):**
+- maxCell = dial-size cap (scale modda: limit açık → maxDialScale×em, kapalı → Infinity).
+- upper'dan (cap) AŞAĞI ara: N ikonu viewport'a (W×H) sığdıran EN BÜYÜK cell. Alt sınır yok.
+- `renderFullScreenPanel`: sabit `cell px` hücreler + `fontSize=cell/dialWidthValue` (tüm em-kaskadı: box/folder/title/favicon
+  cell ile ölçeklenir) + ortalama + taşan bookmark'ları boş hücreye **repack** (eski "gizle" davranışı KALDIRILDI).
+- Panel layout'lar (2/3/4) DOKUNULMADI: CSS `.scale` clamp + Task 1 configurable bounds ile çalışır (scroll metaforu).
+
+**Canlı doğrulama (playwright, demo, faithful path):**
+| Senaryo | cell | grid | ikon | Sonuç |
+|---|---|---|---|---|
+| 320×280, tiny | 63px | 4×3 | 11 görünür, 0 kesik | shrink < cap (alt sınır yok) ✓ |
+| 500×430, tiny | 77px | 5×3 | 11 görünür | ✓ |
+| 1280×800, tiny (cap) | 77px | 14×1 | 11 görünür | büyük ekranda cap'te kalır ✓ |
+| 1280×800, scale cap 2.5× | 231px | 4×3 | 11 (box 143px) | cap'e kadar büyür ✓ |
+| scale, cap KAPALI | 247px+ | — | — | sınırsız büyür ✓ |
+
+**Settings UI:** dialSize="scale" iken "Maximum Scale Limit" grubu görünür: toggle + slider (1–4×) + canlı "A" örnek ikon
+(slider ile 48→90px değişir). Kanıtlandı.
+
+**Baseline:** 34 önceden-var tsc hatası (dokunulmadı, hepsi PR#2 zemininden) · `npm run build` YEŞİL her commit'te.
+
+**Açık ürün kararları (kullanıcıya):**
+- Varsayılan `dialSize` hâlâ "tiny" (cap 77px). "Kutudan çıkar çıkmaz büyük+responsive" isteniyorsa default "scale" yapılabilir
+  (mevcut kullanıcı görünümünü değiştirir → ayrı karar).
+- Settings UI toggle konumu kozmetik ince ayar (başlık üstünde stack) — opsiyonel polish.
+
 ## ÇÖZÜM ZEMİNİ (öneri — implementasyon planı ayrı)
 - Temel: PR #2'yi merge/rebase temeli yap (koordinat sistemi + em-tabanlı hesap zaten doğru yönde).
 - İki sistemi TEK responsive modele indirge: `.scale` clamp'ini full-screen'e de uygula (CSS custom property ile min/max dial genişliği).
