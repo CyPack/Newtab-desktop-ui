@@ -21,7 +21,9 @@ export const SettingsContent = observer(function SettingsContent() {
     handleDefaultFolder,
     handleDialSize,
     handleGridLayout,
+    handleLimitDialScale,
     handleMaxColumns,
+    handleMaxDialScale,
     handleNewTab,
     handleShowTitle,
     handleSquareDials,
@@ -350,6 +352,69 @@ export const SettingsContent = observer(function SettingsContent() {
           <CaretDown />
         </div>
       </div>
+      {settings.dialSize === "scale" && (
+        <div className="setting-wrapper setting-group scale-limit-group">
+          <div className="setting-label">
+            <div className="setting-title" id="scale-limit-title">
+              Maximum Scale Limit
+            </div>
+            <div
+              className="setting-description"
+              id="scale-limit-description"
+            >
+              Limit how large dials grow on big screens. Turn off for unlimited
+              growth, or set the maximum size.
+            </div>
+          </div>
+          <div className="setting-option scale-limit-control">
+            <Switch
+              aria-labelledby="scale-limit-title"
+              aria-describedby="scale-limit-description"
+              onClick={() => handleLimitDialScale(!settings.limitDialScale)}
+              className="switch-root"
+              checked={settings.limitDialScale as boolean}
+            >
+              <span className="switch-thumb" />
+            </Switch>
+            {settings.limitDialScale && (
+              <>
+                <div
+                  className="scale-slider-row"
+                  style={{ display: "flex", alignItems: "center" }}
+                >
+                  <input
+                    type="range"
+                    min={1}
+                    max={4}
+                    step={0.1}
+                    value={settings.maxDialScale}
+                    onChange={(e) =>
+                      handleMaxDialScale(parseFloat(e.target.value))
+                    }
+                    className="scale-slider"
+                    aria-label="Maximum dial scale"
+                  />
+                  <span className="scale-value">
+                    {settings.maxDialScale.toFixed(1)}×
+                  </span>
+                </div>
+                <div className="scale-preview" aria-hidden="true">
+                  <div
+                    className="scale-preview-box"
+                    style={{
+                      width: `${Math.round(settings.maxDialScale * 30)}px`,
+                      height: `${Math.round(settings.maxDialScale * 30)}px`,
+                    }}
+                  >
+                    <span className="scale-preview-glyph">A</span>
+                  </div>
+                  <span className="scale-preview-caption">Preview</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <div className="setting-wrapper setting-group">
         <div className="setting-label">
           <div className="setting-title" id="square-dials-title">

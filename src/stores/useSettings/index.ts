@@ -235,11 +235,13 @@ export const settings = makeAutoObservable({
   firstRun: defaultSettings.firstRun,
   gridLayout: storage[`${apiVersion}-grid-layout`] || defaultSettings.gridLayout,
   limitDialScale:
-    storage[`${apiVersion}-limit-dial-scale`] ?? defaultSettings.limitDialScale,
+    (storage[`${apiVersion}-limit-dial-scale`] as boolean) ??
+    defaultSettings.limitDialScale,
   maxColumns:
     storage[`${apiVersion}-max-columns`] || defaultSettings.maxColumns,
   maxDialScale:
-    storage[`${apiVersion}-max-dial-scale`] ?? defaultSettings.maxDialScale,
+    (storage[`${apiVersion}-max-dial-scale`] as number) ??
+    defaultSettings.maxDialScale,
   newTab: storage[`${apiVersion}-new-tab`] ?? defaultSettings.newTab,
   showAlertBanner: defaultSettings.showAlertBanner,
   showTitle: storage[`${apiVersion}-show-title`] ?? defaultSettings.showTitle,
