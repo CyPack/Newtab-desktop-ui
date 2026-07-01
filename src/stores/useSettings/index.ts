@@ -203,7 +203,9 @@ const defaultSettings = {
   dialSize: "tiny",
   firstRun: !lastVersion,
   gridLayout: "full-screen",
+  limitDialScale: true,
   maxColumns: "Unlimited",
+  maxDialScale: 1.6,
   newTab: false,
   showAlertBanner: !lastVersion || isUpgrade,
   showTitle: true,
@@ -232,8 +234,12 @@ export const settings = makeAutoObservable({
   dialSize: storage[`${apiVersion}-dial-size`] || defaultSettings.dialSize,
   firstRun: defaultSettings.firstRun,
   gridLayout: storage[`${apiVersion}-grid-layout`] || defaultSettings.gridLayout,
+  limitDialScale:
+    storage[`${apiVersion}-limit-dial-scale`] ?? defaultSettings.limitDialScale,
   maxColumns:
     storage[`${apiVersion}-max-columns`] || defaultSettings.maxColumns,
+  maxDialScale:
+    storage[`${apiVersion}-max-dial-scale`] ?? defaultSettings.maxDialScale,
   newTab: storage[`${apiVersion}-new-tab`] ?? defaultSettings.newTab,
   showAlertBanner: defaultSettings.showAlertBanner,
   showTitle: storage[`${apiVersion}-show-title`] ?? defaultSettings.showTitle,
@@ -328,6 +334,16 @@ export const settings = makeAutoObservable({
     browser.storage.local.set({ [`${apiVersion}-max-columns`]: value });
     settings.maxColumns = value;
     bc.postMessage({ maxColumns: value });
+  },
+  handleLimitDialScale(value: boolean) {
+    browser.storage.local.set({ [`${apiVersion}-limit-dial-scale`]: value });
+    settings.limitDialScale = value;
+    bc.postMessage({ limitDialScale: value });
+  },
+  handleMaxDialScale(value: number) {
+    browser.storage.local.set({ [`${apiVersion}-max-dial-scale`]: value });
+    settings.maxDialScale = value;
+    bc.postMessage({ maxDialScale: value });
   },
   handleNewTab(value: boolean) {
     browser.storage.local.set({ [`${apiVersion}-new-tab`]: value });
@@ -442,6 +458,8 @@ export const settings = makeAutoObservable({
     settings.handleDialSize(defaultSettings.dialSize);
     settings.handleGridLayout(defaultSettings.gridLayout);
     settings.handleMaxColumns(defaultSettings.maxColumns);
+    settings.handleLimitDialScale(defaultSettings.limitDialScale);
+    settings.handleMaxDialScale(defaultSettings.maxDialScale);
     settings.handleNewTab(defaultSettings.newTab);
     settings.handleShowTitle(defaultSettings.showTitle);
     settings.handleSquareDials(defaultSettings.squareDials);
@@ -509,6 +527,12 @@ export const settings = makeAutoObservable({
           
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {
             settings.handleMaxColumns(backup.maxColumns);
+          }
+          if (Object.prototype.hasOwnProperty.call(backup, "limitDialScale")) {
+            settings.handleLimitDialScale(backup.limitDialScale);
+          }
+          if (Object.prototype.hasOwnProperty.call(backup, "maxDialScale")) {
+            settings.handleMaxDialScale(backup.maxDialScale);
           }
           if (Object.prototype.hasOwnProperty.call(backup, "newTab")) {
             settings.handleNewTab(backup.newTab);
@@ -749,7 +773,9 @@ export const settings = makeAutoObservable({
       dialImages: settings.dialImages,
       dialSize: settings.dialSize,
       gridLayout: settings.gridLayout,
+      limitDialScale: settings.limitDialScale,
       maxColumns: settings.maxColumns,
+      maxDialScale: settings.maxDialScale,
       newTab: settings.newTab,
       showTitle: settings.showTitle,
       squareDials: settings.squareDials,
@@ -870,6 +896,11 @@ autorun(() => {
       ? (settings.customColor as string | null)
       : null,
   );
+  document.documentElement.style.setProperty(
+    "--dial-scale-max",
+    settings.limitDialScale ? `${settings.maxDialScale}em` : "100em",
+  );
+  document.documentElement.style.setProperty("--dial-scale-min", "0.4em");
 });
 
 // ==================================================================
