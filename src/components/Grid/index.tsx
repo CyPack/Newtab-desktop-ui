@@ -186,7 +186,7 @@ export const Grid = observer(function Grid() {
          : settings.gridLayout === "3-panel" ? 3 
          : 4;
   });
-  const [gridDimensions, setGridDimensions] = useState({ cols: 10, rows: 6 });
+  const [gridDimensions, setGridDimensions] = useState({ cols: 10, rows: 6, cell: 80 });
   const [targetSlotIndex, setTargetSlotIndex] = useState<{ row: number; col: number } | null>(null);
 
   // Refs for drag state
@@ -277,59 +277,94 @@ export const Grid = observer(function Grid() {
     return available;
   }, []);
 
-  // Calculate grid dimensions using CSS-consistent em-based values
+  // Fit-all grid sizing: pick the LARGEST cell size (<= the max set by the
+  // dial-size setting) such that ALL bookmarks fit in the viewport. There is
+  // NO minimum — as the window shrinks, icons shrink proportionally so every
+  // icon is ALWAYS visible (never hidden/clipped). The dial-size selection is
+  // only an upper cap (and, in "scale" mode, the max-scale slider / limit toggle).
   const calculateGridDimensions = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
 
-    const dialWidthValue = settings.squareDials ? 10.25 : 12.125;
-    const gridGapValue = 1.75;
     const padding = 20; // matches renderFullScreenPanel inline padding
+    const dialWidthValue = settings.squareDials ? 10.25 : 12.125;
 
     const gridEl = bottomFullGridRef.current;
+    let availableWidth: number;
+    let availableHeight: number;
     if (gridEl) {
-      // DOM-based calculation (preferred - reads actual rendered sizes)
-      const computedStyle = getComputedStyle(gridEl);
-      const fontSize = parseFloat(computedStyle.fontSize) || 16;
-      const dialWidth = dialWidthValue * fontSize;
-      const gridGap = parseFloat(computedStyle.columnGap || computedStyle.gap) || (gridGapValue * fontSize);
-      const paddingLeft = parseFloat(computedStyle.paddingLeft) || padding;
-      const paddingRight = parseFloat(computedStyle.paddingRight) || padding;
-      const paddingTop = parseFloat(computedStyle.paddingTop) || padding;
-      const paddingBottom = parseFloat(computedStyle.paddingBottom) || padding;
+      const cs = getComputedStyle(gridEl);
+      const pl = parseFloat(cs.paddingLeft) || padding;
+      const pr = parseFloat(cs.paddingRight) || padding;
+      const pt = parseFloat(cs.paddingTop) || padding;
+      const pb = parseFloat(cs.paddingBottom) || padding;
+      availableWidth = gridEl.clientWidth - pl - pr;
+      availableHeight = gridEl.clientHeight - pt - pb;
+    } else {
+      availableWidth = window.innerWidth - padding * 2;
+      availableHeight = window.innerHeight - padding * 2;
+    }
+    if (availableWidth <= 0 || availableHeight <= 0) return;
 
-      const containerWidth = gridEl.clientWidth - paddingLeft - paddingRight;
-      const containerHeight = gridEl.clientHeight - paddingTop - paddingBottom;
-
-      const cols = Math.max(Math.floor((containerWidth + gridGap) / (dialWidth + gridGap)), 3);
-      const rows = Math.max(Math.floor((containerHeight + gridGap) / (dialWidth + gridGap)), 3);
-
-      setGridDimensions(prev =>
-        prev.cols === cols && prev.rows === rows ? prev : { cols, rows }
-      );
-      return;
+    // Maximum cell size in px (the CAP). No minimum floor.
+    const baseFontSize = 16;
+    let maxCell: number;
+    if (settings.dialSize === "scale") {
+      maxCell = settings.limitDialScale
+        ? dialWidthValue * (settings.maxDialScale * baseFontSize)
+        : Infinity; // limit off => grow as large as the viewport allows
+    } else {
+      const emBySize: Record<string, number> = {
+        "extra-tiny": 0.3, "tiny": 0.4, "small": 0.5,
+        "medium": 0.6, "large": 0.7, "huge": 0.8,
+      };
+      const em = emBySize[settings.dialSize as string] ?? 0.4;
+      maxCell = dialWidthValue * (em * baseFontSize);
     }
 
-    // Fallback: CSS-consistent em-based calculation (before first render)
-    const baseFontSize = 16;
-    const sizeMultipliers: Record<string, number> = {
-      "extra-tiny": 0.3, "tiny": 0.4, "small": 0.5,
-      "medium": 0.6, "large": 0.7, "huge": 0.8, "scale": 0.5,
-    };
-    const multiplier = sizeMultipliers[settings.dialSize as string] || 0.4;
-    const effectiveFontSize = baseFontSize * multiplier;
-    const dialWidth = dialWidthValue * effectiveFontSize;
-    const gridGap = gridGapValue * effectiveFontSize;
-
-    const availableWidth = window.innerWidth - (padding * 2);
-    const availableHeight = window.innerHeight - (padding * 2);
-
-    const cols = Math.max(Math.floor((availableWidth + gridGap) / (dialWidth + gridGap)), 3);
-    const rows = Math.max(Math.floor((availableHeight + gridGap) / (dialWidth + gridGap)), 3);
-
-    setGridDimensions(prev =>
-      prev.cols === cols && prev.rows === rows ? prev : { cols, rows }
+    const count = Math.max(
+      1,
+      panelBookmarks.filter((b) => b.panel === "full-screen-panel").length,
     );
-  }, [settings.dialSize, settings.gridLayout, settings.squareDials]);
+
+    const gapRatio = 0.14; // gap is a fraction of the cell size
+    const upper = Number.isFinite(maxCell)
+      ? Math.max(1, Math.floor(maxCell))
+      : Math.max(1, Math.floor(Math.min(availableWidth, availableHeight)));
+
+    // Search downward from the cap for the largest cell that fits all icons.
+    let chosen: { cols: number; rows: number; cell: number } | null = null;
+    for (let cell = upper; cell >= 1; cell--) {
+      const gap = cell * gapRatio;
+      const cols = Math.max(1, Math.floor((availableWidth + gap) / (cell + gap)));
+      const rows = Math.ceil(count / cols);
+      const neededHeight = rows * (cell + gap) - gap;
+      if (neededHeight <= availableHeight) {
+        chosen = { cols, rows, cell };
+        break;
+      }
+    }
+    if (!chosen) {
+      // Extreme case (huge count / tiny viewport): pack as tightly as possible.
+      const gap = 1 * gapRatio;
+      const cols = Math.max(1, Math.floor((availableWidth + gap) / (1 + gap)));
+      chosen = { cols, rows: Math.ceil(count / cols), cell: 1 };
+    }
+
+    setGridDimensions((prev) =>
+      prev.cols === chosen!.cols &&
+      prev.rows === chosen!.rows &&
+      prev.cell === chosen!.cell
+        ? prev
+        : chosen!,
+    );
+  }, [
+    settings.dialSize,
+    settings.gridLayout,
+    settings.squareDials,
+    settings.maxDialScale,
+    settings.limitDialScale,
+    panelBookmarks,
+  ]);
 
   // Organize bookmarks for layout
   const organizeBookmarksForLayout = useCallback(
@@ -1691,13 +1726,37 @@ useEffect(() => {
 
   const renderFullScreenPanel = () => {
     const list = getBookmarksByPanel("full-screen-panel");
-    const { cols, rows } = gridDimensions;
+    const { cols, rows, cell } = gridDimensions;
+    const gap = Math.round(cell * 0.14);
+    // Drive the whole em cascade (box, folder svg, title, favicon) from the
+    // computed cell size: fontSize * dialWidthValue === cell, so --dial-width
+    // (12.125em / 10.25em square) resolves exactly to `cell` px.
+    const dialWidthValue = settings.squareDials ? 10.25 : 12.125;
+    const fontSizePx = cell / dialWidthValue;
 
-    // Build occupied map: "row,col" -> bookmark
+    // Build occupied map: "row,col" -> bookmark. Keep in-bounds, unique coords.
     const occupiedMap = new Map<string, any>();
-    list
-      .filter(bm => bm.row !== undefined && bm.col !== undefined && bm.row < rows && bm.col < cols)
-      .forEach(bm => occupiedMap.set(coordToKey(bm.row, bm.col), bm));
+    const overflow: any[] = [];
+    list.forEach((bm) => {
+      const inBounds =
+        bm.row !== undefined && bm.col !== undefined &&
+        bm.row < rows && bm.col < cols;
+      const key = inBounds ? coordToKey(bm.row, bm.col) : "";
+      if (inBounds && !occupiedMap.has(key)) {
+        occupiedMap.set(key, bm);
+      } else {
+        overflow.push(bm);
+      }
+    });
+    // Re-pack any out-of-bounds / conflicting bookmarks into the first empty
+    // cells so EVERY icon is visible (grid was sized to fit all of them).
+    let oi = 0;
+    for (let r = 0; r < rows && oi < overflow.length; r++) {
+      for (let c = 0; c < cols && oi < overflow.length; c++) {
+        const key = coordToKey(r, c);
+        if (!occupiedMap.has(key)) occupiedMap.set(key, overflow[oi++]);
+      }
+    }
 
     // Generate all visible cells
     const cells: { row: number; col: number; bm: any | null }[] = [];
@@ -1727,10 +1786,15 @@ useEffect(() => {
         className={clsx("Grid", isMaxFontSize && "max-width")}
         style={
           {
+            // Fixed-size cells (fit-all) centered in the viewport. fontSize
+            // drives the em cascade so the whole dial scales with the cell.
+            fontSize: `${fontSizePx}px`,
             display: "grid",
-            gridTemplateColumns: `repeat(${cols}, 1fr)`,
-            gridTemplateRows: `repeat(${rows}, 1fr)`,
-            gap: "1.75em",
+            gridTemplateColumns: `repeat(${cols}, ${cell}px)`,
+            gridTemplateRows: `repeat(${rows}, ${cell}px)`,
+            gap: `${gap}px`,
+            justifyContent: "center",
+            alignContent: "center",
             overflowX: "hidden",
             overflowY: "hidden",
             height: "100vh",
@@ -1755,8 +1819,8 @@ useEffect(() => {
               gridColumn: col + 1,
               gridRow: row + 1,
               position: 'relative',
-              minHeight: '60px',
-              minWidth: '60px',
+              minHeight: 0,
+              minWidth: 0,
               transition: 'all 0.2s ease',
               borderRadius: '8px',
               cursor: bm ? 'grab' : 'pointer',
