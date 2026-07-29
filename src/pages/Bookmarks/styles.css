@@ -11,6 +11,21 @@
   overflow: auto;
 }
 
+/* Full-screen layout only (scoped with :has() so the panel layouts are
+   untouched): the desktop takes exactly the space left under any banner instead
+   of a flat 100vh. Without this the canvas is pushed past the fold whenever the
+   alert banner is showing, and its bottom row is cut off. */
+.Bookmarks:has(.FullScreenViewport) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.Bookmarks:has(.FullScreenViewport) .FullScreenViewport {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 :root {
   --dial-box-shadow:
     -1px 2px 3px rgba(0, 0, 0, 0.12), 1px 2px 3px rgba(0, 0, 0, 0.12);

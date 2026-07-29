@@ -249,3 +249,19 @@ GÖRÜNEN GRID  — cols/rows ASLA değişmez, sadece zoom değişir
 
 > ⚠️ Prob yazarken tuzak: `Dial` kendi kökünde de `data-id` basıyor → her bookmark için İKİ element.
 > `data-id` ile eşleştirme sahte sapma üretir; slot `(row,col)` ile anahtarla.
+
+### Ek düzeltme — ÇIPA = SOL ÜST (2026-07-30, kullanıcı geri bildirimi)
+Tuval ortalanmıştı (`justify/alignItems: center` + `transform-origin: center center`) → ekran
+küçüldükçe düzen içe doğru toplanıyordu; göreli konumlar korunsa da bu "kayma" olarak okunuyordu.
+**Tek sabit referans köşesi = SOL ÜST.** `flex-start` + `transform-origin: top left`.
+Kenar boşluğu sabit 20px bırakıldı (ölçeklenseydi 4K'da devasa, telefonda ~3px olurdu → çıpa tutarsız).
+Ölçüm: çıpa **(20, 20)** — 1920×1080'den 320×480'e kadar DEĞİŞMİYOR.
+
+Ayrıca: `.Bookmarks` içinde AlertBanner + `height:100vh` grid = toplam 100vh'yi aşıyordu →
+banner açıkken tuvalin alt satırı ekranın altında kalıyordu. `:has(.FullScreenViewport)` ile
+scope'lanmış flex-fill düzeltmesi (panel layout'lara DOKUNMAZ).
+
+> 🐞 **Ayrı, önceden var olan bug (düzeltilmedi):** `SettingsGear` (`position:fixed; top:20; right:20;
+> z-index:1000`, kutu 1880-1896 × 24-40) AlertBanner'ın dismiss butonunun (1870-1900 × 14-44)
+> TAM MERKEZİNE biniyor → banner'ı kapatmak için tam ortaya değil biraz SOLA tıklamak gerekiyor.
+> Otomasyonda `click({position:{x:5,y:15}})` şart; `force:true` işe yaramaz (event dişliye gider).

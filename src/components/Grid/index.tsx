@@ -1849,11 +1849,19 @@ useEffect(() => {
       <div
         className="FullScreenViewport"
         style={{
+          // Fallback for the standalone case; Bookmarks/styles.css overrides
+          // this with a flex fill so a banner shrinks the area instead of
+          // pushing the canvas past the fold.
           height: "100vh",
           width: "100%",
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
+          // Anchored top-left, not centred. The canvas needs ONE fixed reference
+          // corner: centring makes the whole arrangement creep inwards as the
+          // window shrinks, which reads as drift even though the icons keep
+          // their relative positions. The top-left corner is the origin
+          // everything else is measured from.
+          alignItems: "flex-start",
+          justifyContent: "flex-start",
           overflow: "hidden",
           padding: "20px",
           boxSizing: "border-box",
@@ -1884,7 +1892,8 @@ useEffect(() => {
             maxWidth: "none",
             flex: "0 0 auto",
             transform: `scale(${scale})`,
-            transformOrigin: "center center",
+            // Scale towards the anchor corner so it stays put at every zoom.
+            transformOrigin: "top left",
             padding: 0,
             margin: 0,
             overflow: "visible",
