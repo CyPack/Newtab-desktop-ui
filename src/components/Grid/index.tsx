@@ -11,6 +11,19 @@ import { modals } from "#stores/useModals";
 import { Dial } from "./Dial";
 import { SettingsGear } from "./SettingsGear";
 import { BookmarkModal } from "../BookmarkModal";
+import {
+  BASE_FONT_SIZE,
+  CAPTURE_FALLBACK_EM,
+  FALLBACK_CANVAS,
+  GAP_RATIO,
+  canvasPixelSize,
+  captureCanvas,
+  occupiedExtent,
+  dialWidthValue,
+  fitScale,
+  logicalCellSize,
+  maxCellSize,
+} from "./layout";
 
 type PanelName = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "bottom-full" | "full-screen-panel";
 
@@ -18,6 +31,22 @@ const PANEL_BOOKMARKS_KEY = "panel-bookmarks";
 const dropZonePercent = 0.6;
 const ORGANIZED_LAYOUT_KEY = "organized-layout";
 const HAS_ORGANIZED_KEY = "has-organized";
+
+function measureGridArea(el: HTMLElement | null) {
+  const fallbackPadding = 20;
+  if (!el) {
+    return {
+      availableWidth: window.innerWidth - fallbackPadding * 2,
+      availableHeight: window.innerHeight - fallbackPadding * 2,
+    };
+  }
+  const cs = getComputedStyle(el);
+  const pad = (value: string) => parseFloat(value) || fallbackPadding;
+  return {
+    availableWidth: el.clientWidth - pad(cs.paddingLeft) - pad(cs.paddingRight),
+    availableHeight: el.clientHeight - pad(cs.paddingTop) - pad(cs.paddingBottom),
+  };
+}
 
 function savePanelBookmarks(panelBookmarks: any[]): boolean {
   try {
@@ -186,7 +215,18 @@ export const Grid = observer(function Grid() {
          : settings.gridLayout === "3-panel" ? 3 
          : 4;
   });
-  const [gridDimensions, setGridDimensions] = useState({ cols: 10, rows: 6, cell: 80 });
+  // Fixed logical canvas — stable across resizes, so every piece of layout and
+  // persistence logic below can depend on it without being re-run by a resize.
+  const canvas = useMemo(
+    () => ({
+      cols: settings.gridCols > 0 ? settings.gridCols : FALLBACK_CANVAS.cols,
+      rows: settings.gridRows > 0 ? settings.gridRows : FALLBACK_CANVAS.rows,
+    }),
+    [settings.gridCols, settings.gridRows],
+  );
+  // Presentation-only: how much to zoom the fixed canvas so it fits the window.
+  const [scale, setScale] = useState(1);
+  const canvasCaptured = useRef(false);
   const [targetSlotIndex, setTargetSlotIndex] = useState<{ row: number; col: number } | null>(null);
 
   // Refs for drag state
@@ -277,93 +317,43 @@ export const Grid = observer(function Grid() {
     return available;
   }, []);
 
-  // Fit-all grid sizing: pick the LARGEST cell size (<= the max set by the
-  // dial-size setting) such that ALL bookmarks fit in the viewport. There is
-  // NO minimum — as the window shrinks, icons shrink proportionally so every
-  // icon is ALWAYS visible (never hidden/clipped). The dial-size selection is
-  // only an upper cap (and, in "scale" mode, the max-scale slider / limit toggle).
-  const calculateGridDimensions = useCallback(() => {
+  // The canvas (cols x rows) is FIXED, so the grid never re-flows; all we do
+  // here is work out how much to zoom it so it fits the window. One transform
+  // scales cell, gap, corner radii, title padding and text alike, which is what
+  // makes shrinking to phone width a true zoom of the same arrangement rather
+  // than a rearrangement. There is a maximum (the dial-size setting) but no
+  // minimum, and the aspect ratio is preserved.
+  const recalculateScale = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
 
-    const padding = 20; // matches renderFullScreenPanel inline padding
-    const dialWidthValue = settings.squareDials ? 10.25 : 12.125;
-
-    const gridEl = bottomFullGridRef.current;
-    let availableWidth: number;
-    let availableHeight: number;
-    if (gridEl) {
-      const cs = getComputedStyle(gridEl);
-      const pl = parseFloat(cs.paddingLeft) || padding;
-      const pr = parseFloat(cs.paddingRight) || padding;
-      const pt = parseFloat(cs.paddingTop) || padding;
-      const pb = parseFloat(cs.paddingBottom) || padding;
-      availableWidth = gridEl.clientWidth - pl - pr;
-      availableHeight = gridEl.clientHeight - pt - pb;
-    } else {
-      availableWidth = window.innerWidth - padding * 2;
-      availableHeight = window.innerHeight - padding * 2;
-    }
+    const { availableWidth, availableHeight } = measureGridArea(
+      bottomFullGridRef.current,
+    );
     if (availableWidth <= 0 || availableHeight <= 0) return;
 
-    // Maximum cell size in px (the CAP). No minimum floor.
-    const baseFontSize = 16;
-    let maxCell: number;
-    if (settings.dialSize === "scale") {
-      maxCell = settings.limitDialScale
-        ? dialWidthValue * (settings.maxDialScale * baseFontSize)
-        : Infinity; // limit off => grow as large as the viewport allows
-    } else {
-      const emBySize: Record<string, number> = {
-        "extra-tiny": 0.3, "tiny": 0.4, "small": 0.5,
-        "medium": 0.6, "large": 0.7, "huge": 0.8,
-      };
-      const em = emBySize[settings.dialSize as string] ?? 0.4;
-      maxCell = dialWidthValue * (em * baseFontSize);
-    }
-
-    const count = Math.max(
-      1,
-      panelBookmarks.filter((b) => b.panel === "full-screen-panel").length,
+    const next = fitScale(
+      canvas.cols,
+      canvas.rows,
+      availableWidth,
+      availableHeight,
+      logicalCellSize(settings.squareDials as boolean),
+      maxCellSize(
+        settings.dialSize as string,
+        settings.squareDials as boolean,
+        settings.limitDialScale as boolean,
+        settings.maxDialScale as number,
+      ),
     );
 
-    const gapRatio = 0.14; // gap is a fraction of the cell size
-    const upper = Number.isFinite(maxCell)
-      ? Math.max(1, Math.floor(maxCell))
-      : Math.max(1, Math.floor(Math.min(availableWidth, availableHeight)));
-
-    // Search downward from the cap for the largest cell that fits all icons.
-    let chosen: { cols: number; rows: number; cell: number } | null = null;
-    for (let cell = upper; cell >= 1; cell--) {
-      const gap = cell * gapRatio;
-      const cols = Math.max(1, Math.floor((availableWidth + gap) / (cell + gap)));
-      const rows = Math.ceil(count / cols);
-      const neededHeight = rows * (cell + gap) - gap;
-      if (neededHeight <= availableHeight) {
-        chosen = { cols, rows, cell };
-        break;
-      }
-    }
-    if (!chosen) {
-      // Extreme case (huge count / tiny viewport): pack as tightly as possible.
-      const gap = 1 * gapRatio;
-      const cols = Math.max(1, Math.floor((availableWidth + gap) / (1 + gap)));
-      chosen = { cols, rows: Math.ceil(count / cols), cell: 1 };
-    }
-
-    setGridDimensions((prev) =>
-      prev.cols === chosen!.cols &&
-      prev.rows === chosen!.rows &&
-      prev.cell === chosen!.cell
-        ? prev
-        : chosen!,
-    );
+    // Ignore imperceptible churn so a ResizeObserver storm can't loop.
+    setScale((prev) => (Math.abs(prev - next) < 0.0005 ? prev : next));
   }, [
+    canvas,
     settings.dialSize,
     settings.gridLayout,
     settings.squareDials,
     settings.maxDialScale,
     settings.limitDialScale,
-    panelBookmarks,
   ]);
 
   // Organize bookmarks for layout
@@ -376,7 +366,7 @@ export const Grid = observer(function Grid() {
       let migrated: any[] = [];
       
       if (targetLayout === "full-screen") {
-        const { cols, rows } = gridDimensions;
+        const { cols, rows } = canvas;
 
         migrated = bookmarkList.map((bm, globalIndex) => {
           if (bm.panel === "full-screen-panel" && bm.row !== undefined && bm.col !== undefined) {
@@ -469,7 +459,7 @@ export const Grid = observer(function Grid() {
       
       if (browserBookmarks.length > 0) {
         if (targetLayout === "full-screen") {
-          const { cols, rows } = gridDimensions;
+          const { cols, rows } = canvas;
           const availableCoords = getNextAvailableCoords(migrated, cols, rows, browserBookmarks.length);
 
           distributed = browserBookmarks.slice(0, availableCoords.length).map((bm: any, i: number) => ({
@@ -511,19 +501,19 @@ export const Grid = observer(function Grid() {
 
       return [...migrated, ...distributed];
     },
-    [gridDimensions, bookmarks, lastOrganizedLayout, hasOrganizedForLayout, getNextAvailableCoords, findEmptySlot]
+    [canvas, bookmarks, lastOrganizedLayout, hasOrganizedForLayout, getNextAvailableCoords, findEmptySlot]
   );
 
   // Effects
   useEffect(() => {
-    calculateGridDimensions();
+    recalculateScale();
 
     const gridEl = bottomFullGridRef.current;
     if (gridEl && typeof ResizeObserver !== 'undefined') {
       let rafId: number;
       const observer = new ResizeObserver(() => {
         cancelAnimationFrame(rafId);
-        rafId = requestAnimationFrame(() => calculateGridDimensions());
+        rafId = requestAnimationFrame(() => recalculateScale());
       });
       observer.observe(gridEl);
       return () => {
@@ -533,9 +523,72 @@ export const Grid = observer(function Grid() {
     }
 
     // Fallback for pre-render or no ResizeObserver
-    window.addEventListener("resize", calculateGridDimensions);
-    return () => window.removeEventListener("resize", calculateGridDimensions);
-  }, [calculateGridDimensions]);
+    window.addEventListener("resize", recalculateScale);
+    return () => window.removeEventListener("resize", recalculateScale);
+  }, [recalculateScale]);
+
+  // One-time capture of the fixed canvas: only when it has never been set (fresh
+  // install, or after a reset). Sized so the CURRENT viewport looks natural at
+  // the chosen dial size, and never smaller than what existing bookmarks occupy.
+  // After this it is persisted and a resize can no longer change it.
+  useEffect(() => {
+    if (settings.gridLayout !== "full-screen") return;
+    if (settings.gridCols > 0 && settings.gridRows > 0) return;
+    if (canvasCaptured.current) return;
+
+    const { availableWidth, availableHeight } = measureGridArea(
+      bottomFullGridRef.current,
+    );
+    if (availableWidth <= 0 || availableHeight <= 0) return;
+
+    const cap = maxCellSize(
+      settings.dialSize as string,
+      settings.squareDials as boolean,
+      settings.limitDialScale as boolean,
+      settings.maxDialScale as number,
+    );
+    const referenceCell = Number.isFinite(cap)
+      ? cap
+      : dialWidthValue(settings.squareDials as boolean) *
+        CAPTURE_FALLBACK_EM *
+        BASE_FONT_SIZE;
+
+    const { cols, rows } = captureCanvas(
+      availableWidth,
+      availableHeight,
+      referenceCell,
+      panelBookmarks,
+    );
+
+    canvasCaptured.current = true;
+    settings.handleGridCanvas(cols, rows);
+  }, [
+    settings.gridLayout,
+    settings.gridCols,
+    settings.gridRows,
+    settings.dialSize,
+    settings.squareDials,
+    settings.limitDialScale,
+    settings.maxDialScale,
+    panelBookmarks,
+  ]);
+
+  // Safety net: if a bookmark ends up outside the canvas (legacy data, a smaller
+  // canvas restored from a backup, a manual settings change), GROW the canvas
+  // rather than moving the icon. Positions are the thing we promise to preserve.
+  useEffect(() => {
+    if (settings.gridLayout !== "full-screen") return;
+    if (settings.gridCols <= 0 || settings.gridRows <= 0) return;
+
+    const extent = occupiedExtent(panelBookmarks);
+    const cols = Math.max(settings.gridCols, extent.cols);
+    let rows = Math.max(settings.gridRows, extent.rows);
+    while (cols * rows < extent.count) rows += 1;
+
+    if (cols !== settings.gridCols || rows !== settings.gridRows) {
+      settings.handleGridCanvas(cols, rows);
+    }
+  }, [settings.gridLayout, settings.gridCols, settings.gridRows, panelBookmarks]);
 
   useEffect(() => {
     if (panelBookmarks.length === 0) {
@@ -717,7 +770,7 @@ export const Grid = observer(function Grid() {
               coord = targetSlotIndex;
               setTargetSlotIndex(null);
             } else {
-              coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+              coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
             }
             panelBookmarkEntry.row = coord.row;
             panelBookmarkEntry.col = coord.col;
@@ -756,7 +809,7 @@ export const Grid = observer(function Grid() {
               coord = targetSlotIndex;
               setTargetSlotIndex(null);
             } else {
-              coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+              coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
             }
             panelFolderEntry.row = coord.row;
             panelFolderEntry.col = coord.col;
@@ -775,7 +828,7 @@ export const Grid = observer(function Grid() {
     return () => {
       delete (window as any).panelBookmarkManager;
     };
-  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, gridDimensions, targetSlotIndex, updatePanelBookmarksWithSave, isRootSafe]);
+  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, canvas, targetSlotIndex, updatePanelBookmarksWithSave, isRootSafe]);
 
   // Main bookmark sync
   useEffect(() => {
@@ -808,7 +861,7 @@ export const Grid = observer(function Grid() {
           // Use original column count from backup restore if available,
           // otherwise fall back to current viewport calculation
           const storedCols = parseInt(localStorage.getItem('migration-grid-cols') || '0');
-          const migrationCols = storedCols > 0 ? storedCols : gridDimensions.cols;
+          const migrationCols = storedCols > 0 ? storedCols : canvas.cols;
           savedPanelBookmarks = migrateIndexToRowCol(savedPanelBookmarks, migrationCols);
           savePanelBookmarks(savedPanelBookmarks);
           // Clean up migration hint after use
@@ -875,7 +928,7 @@ export const Grid = observer(function Grid() {
         
         if (newBrowserBookmarks.length > 0) {
           if (settings.gridLayout === "full-screen") {
-            const availableCoords = getNextAvailableCoords(finalBookmarks, gridDimensions.cols, gridDimensions.rows, newBrowserBookmarks.length);
+            const availableCoords = getNextAvailableCoords(finalBookmarks, canvas.cols, canvas.rows, newBrowserBookmarks.length);
 
             const newPanelBookmarks = newBrowserBookmarks.slice(0, availableCoords.length).map((bm: any, i: number) => ({
               ...bm,
@@ -956,7 +1009,7 @@ export const Grid = observer(function Grid() {
   settings.gridLayout, 
   bookmarks.bookmarks,
   organizeBookmarksForLayout,
-  gridDimensions,
+  canvas,
   getNextAvailableCoords
 ]);
 
@@ -996,7 +1049,7 @@ useEffect(() => {
       };
 
       if (settings.gridLayout === "full-screen") {
-        const coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+        const coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
         newPanelBookmark.panel = "full-screen-panel";
         newPanelBookmark.row = coord.row;
         newPanelBookmark.col = coord.col;
@@ -1042,7 +1095,7 @@ useEffect(() => {
   return () => {
     listeners.forEach(cleanup => cleanup());
   };
-}, [isRootSafe, bookmarks.currentFolder?.id, getNextIndexForPanel, updatePanelBookmarksWithSave, findEmptySlot, gridDimensions, panelBookmarks, settings.gridLayout]);
+}, [isRootSafe, bookmarks.currentFolder?.id, getNextIndexForPanel, updatePanelBookmarksWithSave, findEmptySlot, canvas, panelBookmarks, settings.gridLayout]);
 
   useEffect(() => {
     const newPanelCount = settings.gridLayout === "2-panel" ? 2 
@@ -1058,15 +1111,26 @@ useEffect(() => {
   useEffect(() => {
     const checkFontSize = () => {
       const gridRef = topLeftGridRef.current;
-      if (gridRef) {
-        const fontSize = parseFloat(getComputedStyle(gridRef).fontSize);
-        setIsMaxFontSize(fontSize === 25.6);
-      }
+      if (!gridRef) return;
+      // The `.scale` clamp tops out at --dial-scale-max, which the max-scale
+      // slider drives. Compare against that instead of the old hardcoded 25.6px
+      // (1.6em), which silently stopped matching once the limit became settable.
+      if (!settings.limitDialScale) return setIsMaxFontSize(false);
+      const capPx = (settings.maxDialScale as number) * BASE_FONT_SIZE;
+      const fontSize = parseFloat(getComputedStyle(gridRef).fontSize);
+      setIsMaxFontSize(fontSize >= capPx - 0.5);
     };
     checkFontSize();
     window.addEventListener("resize", checkFontSize);
     return () => window.removeEventListener("resize", checkFontSize);
-  }, [settings.dialSize, settings.maxColumns, settings.squareDials, settings.gridLayout]);
+  }, [
+    settings.dialSize,
+    settings.maxColumns,
+    settings.squareDials,
+    settings.gridLayout,
+    settings.limitDialScale,
+    settings.maxDialScale,
+  ]);
 
   useEffect(() => {
     const handlePanelBookmarkModal = (event: CustomEvent) => {
@@ -1353,7 +1417,7 @@ useEffect(() => {
         };
 
         if (currentFolderPanel === "full-screen-panel") {
-          const coord = findEmptySlot(loadPanelBookmarks(), gridDimensions.cols, gridDimensions.rows);
+          const coord = findEmptySlot(loadPanelBookmarks(), canvas.cols, canvas.rows);
           panelBookmarkEntry.row = coord.row;
           panelBookmarkEntry.col = coord.col;
         } else {
@@ -1365,7 +1429,7 @@ useEffect(() => {
         savePanelBookmarks(updatedSavedBookmarks);
       }
     } catch (error) {}
-  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, gridDimensions]);
+  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, canvas]);
 
   const handleDropOnItem = useCallback((e: React.DragEvent, targetPanel: string, targetIndex: number, targetId: string, targetType: string) => {
     e.preventDefault();
@@ -1421,7 +1485,7 @@ useEffect(() => {
           } else {
             const empty = findEmptySlot(
               currentBookmarks.filter(b => b.id !== d.id),
-              gridDimensions.cols, gridDimensions.rows
+              canvas.cols, canvas.rows
             );
             return { ...bookmark, row: empty.row, col: empty.col };
           }
@@ -1431,7 +1495,7 @@ useEffect(() => {
     });
 
     draggedRef.current = null;
-  }, [clearAllDragStyles, gridDimensions, findEmptySlot, updatePanelBookmarksWithSave]);
+  }, [clearAllDragStyles, canvas, findEmptySlot, updatePanelBookmarksWithSave]);
 
   const handleDropOnPanelEnd = useCallback((e: React.DragEvent, targetPanel: string) => {
     e.preventDefault();
@@ -1444,7 +1508,7 @@ useEffect(() => {
 
     if (targetPanel === "full-screen-panel") {
       updatePanelBookmarksWithSave((current) => {
-        const empty = findEmptySlot(current, gridDimensions.cols, gridDimensions.rows);
+        const empty = findEmptySlot(current, canvas.cols, canvas.rows);
         return current.map(bookmark =>
           bookmark.id === d.id
             ? { ...bookmark, panel: "full-screen-panel", row: empty.row, col: empty.col }
@@ -1465,7 +1529,7 @@ useEffect(() => {
     }
     
     draggedRef.current = null;
-  }, [panelBookmarks, reorderWithinPanel, moveAcrossPanels, clearAllDragStyles, gridDimensions, findEmptySlot, updatePanelBookmarksWithSave]);
+  }, [panelBookmarks, reorderWithinPanel, moveAcrossPanels, clearAllDragStyles, canvas, findEmptySlot, updatePanelBookmarksWithSave]);
 
   // Drag event handlers
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1561,7 +1625,7 @@ useEffect(() => {
             coord = targetSlotIndex;
             setTargetSlotIndex(null);
           } else {
-            coord = findEmptySlot(panelBookmarks, gridDimensions.cols, gridDimensions.rows);
+            coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
           }
           panelBookmarkEntry.row = coord.row;
           panelBookmarkEntry.col = coord.col;
@@ -1726,13 +1790,12 @@ useEffect(() => {
 
   const renderFullScreenPanel = () => {
     const list = getBookmarksByPanel("full-screen-panel");
-    const { cols, rows, cell } = gridDimensions;
-    const gap = Math.round(cell * 0.14);
-    // Drive the whole em cascade (box, folder svg, title, favicon) from the
-    // computed cell size: fontSize * dialWidthValue === cell, so --dial-width
-    // (12.125em / 10.25em square) resolves exactly to `cell` px.
-    const dialWidthValue = settings.squareDials ? 10.25 : 12.125;
-    const fontSizePx = cell / dialWidthValue;
+    const { cols, rows } = canvas;
+    // The canvas is laid out ONCE at its logical size and then zoomed by a
+    // single transform, so nothing about the arrangement depends on the window.
+    const logicalCell = logicalCellSize(settings.squareDials as boolean);
+    const logicalGap = logicalCell * GAP_RATIO;
+    const logical = canvasPixelSize(cols, rows, logicalCell);
 
     // Build occupied map: "row,col" -> bookmark. Keep in-bounds, unique coords.
     const occupiedMap = new Map<string, any>();
@@ -1748,8 +1811,9 @@ useEffect(() => {
         overflow.push(bm);
       }
     });
-    // Re-pack any out-of-bounds / conflicting bookmarks into the first empty
-    // cells so EVERY icon is visible (grid was sized to fit all of them).
+    // Last-resort placement for bookmarks that share a coordinate. Out-of-bounds
+    // ones normally never reach here: the canvas grows to contain them instead of
+    // moving them (see the canvas safety-net effect above).
     let oi = 0;
     for (let r = 0; r < rows && oi < overflow.length; r++) {
       for (let c = 0; c < cols && oi < overflow.length; c++) {
@@ -1783,31 +1847,50 @@ useEffect(() => {
 
     return (
       <div
-        className={clsx("Grid", isMaxFontSize && "max-width")}
-        style={
-          {
-            // Fixed-size cells (fit-all) centered in the viewport. fontSize
-            // drives the em cascade so the whole dial scales with the cell.
-            fontSize: `${fontSizePx}px`,
-            display: "grid",
-            gridTemplateColumns: `repeat(${cols}, ${cell}px)`,
-            gridTemplateRows: `repeat(${rows}, ${cell}px)`,
-            gap: `${gap}px`,
-            justifyContent: "center",
-            alignContent: "center",
-            overflowX: "hidden",
-            overflowY: "hidden",
-            height: "100vh",
-            padding: "20px",
-            boxSizing: "border-box",
-          } as React.CSSProperties
-        }
+        className="FullScreenViewport"
+        style={{
+          height: "100vh",
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          overflow: "hidden",
+          padding: "20px",
+          boxSizing: "border-box",
+        }}
         ref={bottomFullGridRef}
-        data-panel="full-screen-panel"
         onDragOver={handleDragOver}
         onDragEnter={handlePanelDragEnter}
         onDragLeave={handlePanelDragLeave}
         onDrop={(e) => handleDropOnPanelEnd(e, "full-screen-panel")}
+      >
+      <div
+        className={clsx("Grid", isMaxFontSize && "max-width")}
+        style={
+          {
+            // Laid out at the LOGICAL size and zoomed as a whole. Column and row
+            // counts come from settings and never change with the window, and a
+            // single transform carries cell size, gaps, radii, padding and text
+            // together — so the arrangement is identical at every resolution.
+            fontSize: `${BASE_FONT_SIZE}px`,
+            display: "grid",
+            gridTemplateColumns: `repeat(${cols}, ${logicalCell}px)`,
+            gridTemplateRows: `repeat(${rows}, ${logicalCell}px)`,
+            gap: `${logicalGap}px`,
+            width: `${logical.width}px`,
+            height: `${logical.height}px`,
+            // .Grid ships a max-width rule for the column-limited panel layouts;
+            // it must not clip the canvas here.
+            maxWidth: "none",
+            flex: "0 0 auto",
+            transform: `scale(${scale})`,
+            transformOrigin: "center center",
+            padding: 0,
+            margin: 0,
+            overflow: "visible",
+          } as React.CSSProperties
+        }
+        data-panel="full-screen-panel"
       >
         {cells.map(({ row, col, bm }) => (
           <div
@@ -1876,6 +1959,7 @@ useEffect(() => {
             )}
           </div>
         ))}
+      </div>
       </div>
     );
   };

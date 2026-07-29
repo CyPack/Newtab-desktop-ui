@@ -189,3 +189,63 @@ Ekran küçüldükçe ikonlar orantılı küçülür ve HER ZAMAN görünür (as
 - settings store: `scaleMode` ("fit"|"fixed"), `maxScalePx`/`maxScaleEm` alanları + `handle*` + backup/restore + autorun class.
 
 *Bağımlı kurallar: discovery-first (bu harita), evidence-propagation (her iddia koda dayalı), state-comparison-reporting.*
+
+---
+
+## 🔁 MİMARİ DEĞİŞİKLİK (2026-07-30) — fit-all → SABİT TUVAL + TRANSFORM ZOOM
+
+**Kullanıcının asıl gereksinimi (netleştirildi):** ikon BOYUTU önemsiz; önemli olan **yerleşim
+pozisyonlarının değişmemesi**. "Telefon ekranına küçülttüğümde o alanı karınca kadar da olsa orda
+yine aynı app ikonlarını birbirlerinden aynı mesafede ve aynı alt/üst/sağ/sol pozisyonlanmasında
+görmek istiyorum."
+
+### Neden "fit-all" (6d39310) yanlıştı
+`calculateGridDimensions` her resize'da `cols`'u viewport genişliğinden YENİDEN hesaplıyordu
+(`cols = floor((availW + gap) / (cell + gap))`). Kolon sayısı değişince grid akıyor (reflow);
+`(row,col)` koordinatları korunsa bile ikonların ekrandaki yeri kayıyordu. Yani fit-all,
+istenen şeyin tam tersini yapıyordu.
+
+### Yeni model
+```
+SABİT MANTIKSAL TUVAL (settings.gridCols x settings.gridRows, storage'da kalıcı)
+   ↓ bir kere, sabit logical cell (= --dial-width @16px) ile layout
+   ↓ transform: scale(s)  ·  s = min(availW/logicalW, availH/logicalH, cap/logicalCell)
+GÖRÜNEN GRID  — cols/rows ASLA değişmez, sadece zoom değişir
+```
+- Aspect ratio korunur (letterbox); artan yer eşit kenar boşluğu olur.
+- MIN yok, MAX var (dial-size / max-scale slider) — eski felsefe korundu.
+- Tek `transform` olduğu için sabit-px CSS detayları (border-radius 12px, title
+  `padding-inline: 8px`, `clamp(10px, .8125em, 15px)`) da ölçekleniyor — px hesabı
+  yaklaşımında bunlar donuk kalıyordu.
+- Tuval yalnız İKİ şeyle değişir: (1) kullanıcı Settings > Desktop Grid'den değiştirir,
+  (2) sınır dışına düşen bir bookmark varsa tuval BÜYÜR (ikon taşınmaz — konum kutsal).
+
+### Dosyalar
+- `src/components/Grid/layout.ts` **(YENİ)** — saf matematik: `fitScale`, `logicalCellSize`,
+  `maxCellSize`, `captureCanvas`, `occupiedExtent`, `canvasPixelSize`. DOM/store bağımlılığı yok.
+- `src/components/Grid/layout.test.ts` **(YENİ)** — 12 test; invaryantı çalıştırılabilir hale getirir.
+- `src/components/Grid/index.tsx` — `gridDimensions` state → `canvas` (settings'ten memo, resize'dan
+  bağımsız) + `scale` state. `calculateGridDimensions` (O(cap) lineer arama) silindi.
+  `isMaxFontSize`'ın sabit-kodlu `25.6` karşılaştırması `maxDialScale`'e bağlandı.
+- `src/stores/useSettings/index.ts` — `gridCols`/`gridRows` + `handleGridCanvas` + backup/restore/reset.
+- `src/components/SettingsContent/` — "Desktop Grid" grubu (cols x rows + oranlı önizleme + auto-fit reset).
+
+### Doğrulama (2026-07-30)
+- `npx vitest run` → **45/45 PASS** (12'si yeni layout invaryant testi)
+- `npm run build` → YEŞİL · `npx tsc -b` → **34 hata** (baseline ile AYNI, regresyon yok)
+- Canlı playwright probu (tek yükleme + sadece resize, reload YOK):
+
+| viewport | cols×rows | slot | cell | aspect | slot konum sapması |
+|---|---|---|---|---|---|
+| 1920×1080 | 21×11 | 231 | 77.60px | 1.9193536 | 0 |
+| 1366×768 | 21×11 | 231 | 55.71px | 1.9193537 | 1.16e-7 |
+| 1024×768 | 21×11 | 231 | 41.34px | 1.9193537 | 1.43e-7 |
+| 800×600 | 21×11 | 231 | 31.93px | 1.9193537 | 1.24e-7 |
+| 412×915 | 21×11 | 231 | 15.63px | 1.9193531 | 3.10e-7 |
+| 320×480 | 21×11 | 231 | 11.76px | 1.9193538 | 2.18e-7 |
+
+İkon-içi geometri sapması ≤ 1.33e-6 → ikon içeriği de orantılı ölçekleniyor. Konsol hatası yok.
+**VERDICT: PASS** — sapma float hassasiyeti seviyesinde (0.0001px altı).
+
+> ⚠️ Prob yazarken tuzak: `Dial` kendi kökünde de `data-id` basıyor → her bookmark için İKİ element.
+> `data-id` ile eşleştirme sahte sapma üretir; slot `(row,col)` ile anahtarla.

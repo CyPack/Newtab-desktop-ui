@@ -202,6 +202,12 @@ const defaultSettings = {
   dialImages: {} as DialImages,
   dialSize: "tiny",
   firstRun: !lastVersion,
+  // Fixed logical canvas for the full-screen layout. The grid ALWAYS renders
+  // this many columns/rows regardless of viewport size — only the cell size
+  // scales — so icon positions never reflow. 0 = not captured yet (the Grid
+  // captures it once from the first viewport, then it stays put).
+  gridCols: 0,
+  gridRows: 0,
   gridLayout: "full-screen",
   limitDialScale: true,
   maxColumns: "Unlimited",
@@ -233,6 +239,10 @@ export const settings = makeAutoObservable({
     defaultSettings.dialImages,
   dialSize: storage[`${apiVersion}-dial-size`] || defaultSettings.dialSize,
   firstRun: defaultSettings.firstRun,
+  gridCols:
+    (storage[`${apiVersion}-grid-cols`] as number) ?? defaultSettings.gridCols,
+  gridRows:
+    (storage[`${apiVersion}-grid-rows`] as number) ?? defaultSettings.gridRows,
   gridLayout: storage[`${apiVersion}-grid-layout`] || defaultSettings.gridLayout,
   limitDialScale:
     (storage[`${apiVersion}-limit-dial-scale`] as boolean) ??
@@ -331,6 +341,22 @@ export const settings = makeAutoObservable({
     browser.storage.local.set({ [`${apiVersion}-grid-layout`]: value });
     settings.gridLayout = value;
     bc.postMessage({ gridLayout: value });
+  },
+  // Sets the fixed logical canvas (columns x rows) for the full-screen layout.
+  // Changing this is the ONLY thing that re-flows icon positions — resizing the
+  // window never does.
+  // Passing 0 for both resets it to "auto" (re-captured from the next viewport).
+  handleGridCanvas(cols: number, rows: number) {
+    const auto = cols <= 0 || rows <= 0;
+    const safeCols = auto ? 0 : Math.max(1, Math.min(60, Math.round(cols)));
+    const safeRows = auto ? 0 : Math.max(1, Math.min(40, Math.round(rows)));
+    browser.storage.local.set({
+      [`${apiVersion}-grid-cols`]: safeCols,
+      [`${apiVersion}-grid-rows`]: safeRows,
+    });
+    settings.gridCols = safeCols;
+    settings.gridRows = safeRows;
+    bc.postMessage({ gridCols: safeCols, gridRows: safeRows });
   },
   handleMaxColumns(value: string) {
     browser.storage.local.set({ [`${apiVersion}-max-columns`]: value });
@@ -459,6 +485,7 @@ export const settings = makeAutoObservable({
     settings.handleDefaultFolder(defaultSettings.defaultFolder);
     settings.handleDialSize(defaultSettings.dialSize);
     settings.handleGridLayout(defaultSettings.gridLayout);
+    settings.handleGridCanvas(defaultSettings.gridCols, defaultSettings.gridRows);
     settings.handleMaxColumns(defaultSettings.maxColumns);
     settings.handleLimitDialScale(defaultSettings.limitDialScale);
     settings.handleMaxDialScale(defaultSettings.maxDialScale);
@@ -527,6 +554,18 @@ export const settings = makeAutoObservable({
             console.log('Restored grid layout:', backup.gridLayout);
           }
           
+          if (
+            Object.prototype.hasOwnProperty.call(backup, "gridCols") &&
+            Object.prototype.hasOwnProperty.call(backup, "gridRows")
+          ) {
+            settings.handleGridCanvas(backup.gridCols, backup.gridRows);
+            console.log(
+              "Restored fixed grid canvas:",
+              backup.gridCols,
+              "x",
+              backup.gridRows,
+            );
+          }
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {
             settings.handleMaxColumns(backup.maxColumns);
           }
@@ -774,6 +813,8 @@ export const settings = makeAutoObservable({
       dialColors: settings.dialColors,
       dialImages: settings.dialImages,
       dialSize: settings.dialSize,
+      gridCols: settings.gridCols,
+      gridRows: settings.gridRows,
       gridLayout: settings.gridLayout,
       limitDialScale: settings.limitDialScale,
       maxColumns: settings.maxColumns,

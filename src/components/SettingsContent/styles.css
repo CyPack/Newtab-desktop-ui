@@ -295,3 +295,83 @@
   font-size: 11px;
   opacity: 0.7;
 }
+
+/* Desktop grid (fixed canvas) control */
+
+.canvas-size-control {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.canvas-size-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.canvas-size-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.canvas-size-input {
+  width: 72px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-size-times {
+  padding-bottom: 8px;
+  opacity: 0.6;
+}
+
+/* Proportional map of the canvas: the shape of the grid is the point, so the
+   preview keeps the real aspect ratio rather than filling the available box. */
+.canvas-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.canvas-preview-frame {
+  display: grid;
+  gap: 1px;
+  width: 168px;
+  max-height: 96px;
+  padding: 4px;
+  border-radius: 6px;
+  background-color: rgba(120, 120, 120, 0.18);
+}
+
+.canvas-preview-cell {
+  background-color: rgba(120, 120, 120, 0.55);
+  border-radius: 1px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.canvas-preview-caption {
+  font-size: 11px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-size-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  cursor: pointer;
+  color: #1976d2;
+  text-decoration: underline;
+
+  .color-scheme-dark & {
+    color: #90caf9;
+  }
+}

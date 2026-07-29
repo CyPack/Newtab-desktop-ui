@@ -20,6 +20,7 @@ export const SettingsContent = observer(function SettingsContent() {
     handleCustomImage,
     handleDefaultFolder,
     handleDialSize,
+    handleGridCanvas,
     handleGridLayout,
     handleLimitDialScale,
     handleMaxColumns,
@@ -37,7 +38,12 @@ export const SettingsContent = observer(function SettingsContent() {
   } = settings;
 
   const [defaultFolderValue, setDefaultFolderValue] = useState("");
-  
+
+  // 0 means "not captured yet" — the grid picks a canvas the first time it
+  // renders. Mirror the Grid's fallback here so the control never shows a zero.
+  const canvasCols = (settings.gridCols as number) > 0 ? (settings.gridCols as number) : 10;
+  const canvasRows = (settings.gridRows as number) > 0 ? (settings.gridRows as number) : 6;
+
   const wallpaperColors = [
     "Dark",
     "Light", 
@@ -228,6 +234,80 @@ export const SettingsContent = observer(function SettingsContent() {
           <CaretDown />
         </div>
       </div>
+      {settings.gridLayout === "full-screen" && (
+        <div className="setting-wrapper setting-group canvas-size-group">
+          <div className="setting-label">
+            <div className="setting-title" id="grid-canvas-title">
+              Desktop Grid
+            </div>
+            <div className="setting-description" id="grid-canvas-description">
+              How many columns and rows your desktop has. This is fixed: resizing
+              the window scales everything together instead of rearranging it, so
+              icons keep the same positions and spacing at any screen size.
+              Changing these numbers is the only thing that moves them.
+            </div>
+          </div>
+          <div className="setting-option canvas-size-control">
+            <div className="canvas-size-row">
+              <label className="canvas-size-field">
+                <span>Columns</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={canvasCols}
+                  onChange={(e) =>
+                    handleGridCanvas(parseInt(e.target.value, 10), canvasRows)
+                  }
+                  className="input canvas-size-input"
+                  aria-label="Desktop grid columns"
+                />
+              </label>
+              <span className="canvas-size-times" aria-hidden="true">
+                ×
+              </span>
+              <label className="canvas-size-field">
+                <span>Rows</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={40}
+                  value={canvasRows}
+                  onChange={(e) =>
+                    handleGridCanvas(canvasCols, parseInt(e.target.value, 10))
+                  }
+                  className="input canvas-size-input"
+                  aria-label="Desktop grid rows"
+                />
+              </label>
+            </div>
+            <div className="canvas-preview" aria-hidden="true">
+              <div
+                className="canvas-preview-frame"
+                style={{
+                  gridTemplateColumns: `repeat(${canvasCols}, 1fr)`,
+                  gridTemplateRows: `repeat(${canvasRows}, 1fr)`,
+                  aspectRatio: `${canvasCols} / ${canvasRows}`,
+                }}
+              >
+                {Array.from({ length: canvasCols * canvasRows }, (_, i) => (
+                  <span className="canvas-preview-cell" key={i} />
+                ))}
+              </div>
+              <span className="canvas-preview-caption">
+                {canvasCols * canvasRows} slots
+              </span>
+            </div>
+            <button
+              type="button"
+              className="canvas-size-reset"
+              onClick={() => handleGridCanvas(0, 0)}
+            >
+              Reset to auto-fit
+            </button>
+          </div>
+        </div>
+      )}
       <div className="setting-wrapper setting-group">
         <div className="setting-label">
           <div className="setting-title" id="color-scheme-title">
