@@ -1967,6 +1967,11 @@ useEffect(() => {
             left: 0,
             transform: `scale(${scale})`,
             transformOrigin: "top left",
+            // Everything inside is drawn at the logical size and then shrunk by
+            // `scale`, which would make a 2px drop outline land as 0.8px on a
+            // typical desk. Feedback lines divide by this so they keep their
+            // weight on screen whatever the zoom.
+            ["--desk-scale" as never]: `${scale}`,
             padding: 0,
             margin: 0,
             overflow: "visible",
@@ -2140,29 +2145,32 @@ useEffect(() => {
       content: "";
       position: absolute;
       inset: 0;
-      border-radius: 10px;
+      /* Widths and radii are divided by the desk zoom so the feedback reads at
+         a constant weight on screen instead of thinning away as icons shrink. */
+      --line: calc(2.5px / var(--desk-scale, 1));
+      border-radius: calc(10px / var(--desk-scale, 1));
       pointer-events: none;
       transition: background-color 0.12s ease, box-shadow 0.12s ease;
     }
 
     /* Move into an empty cell — a quiet outline, since nothing is displaced. */
     .grid-slot.drop-move::after {
-      background: rgba(255, 255, 255, 0.08);
-      box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55);
+      background: rgba(255, 255, 255, 0.12);
+      box-shadow: inset 0 0 0 var(--line) rgba(255, 255, 255, 0.75);
     }
 
     /* Swap with the icon already there — amber, because something else moves
        too, and that deserves a warmer, more attention-getting cue. */
     .grid-slot.drop-swap::after {
-      background: rgba(234, 179, 8, 0.16);
-      box-shadow: inset 0 0 0 2px rgba(234, 179, 8, 0.85);
+      background: rgba(234, 179, 8, 0.2);
+      box-shadow: inset 0 0 0 var(--line) rgba(234, 179, 8, 0.95);
     }
 
     /* File inside a folder — green, and the folder swells slightly to read as
        a container opening rather than a cell being occupied. */
     .grid-slot.drop-folder::after {
-      background: rgba(34, 197, 94, 0.18);
-      box-shadow: inset 0 0 0 2px rgba(34, 197, 94, 0.9);
+      background: rgba(34, 197, 94, 0.22);
+      box-shadow: inset 0 0 0 var(--line) rgba(34, 197, 94, 1);
     }
     .grid-slot.drop-folder > * {
       transform: scale(1.08);
@@ -2174,9 +2182,11 @@ useEffect(() => {
       opacity: 0.35;
     }
 
+    /* Empty cells answer the pointer, so the grid is discoverable rather than
+       looking like blank wallpaper. */
     .grid-slot:empty:hover {
-      background: rgba(255, 255, 255, 0.04);
-      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: calc(8px / var(--desk-scale, 1));
     }
 
     .breadcrumb-drop-target {
