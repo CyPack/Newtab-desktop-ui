@@ -15,8 +15,10 @@
  *                          first, down to a single empty one, before anything
  *                          shrinks. Only once the content plus that one empty
  *                          margin still doesn't fit does the whole thing zoom
- *                          out — and it stops at a minimum cell size, after
- *                          which the desk scrolls instead of becoming unusable.
+ *                          out — and it will zoom as far as it needs to. There
+ *                          is deliberately no lower bound: on a laptop, on a
+ *                          MacBook, on a phone, the same arrangement is always
+ *                          fully visible, however small that makes the icons.
  *
  * Throughout, the content block itself is RIGID: icons never rearrange relative
  * to each other. Only the empty desk around them, and the zoom, respond to the
@@ -34,9 +36,6 @@ export const BASE_PAGE = { width: 1920, height: 1080 };
 
 /** Padding between the desk and the window edge, in px. */
 export const VIEWPORT_PADDING = 20;
-
-/** Smallest cell we will shrink to before the desk starts scrolling. */
-export const DEFAULT_MIN_CELL = 32;
 
 /** Dial-size setting -> cell width in em (matches Grid/styles.css). */
 export const DIAL_SIZE_EM: Record<string, number> = {
@@ -71,7 +70,8 @@ export function logicalCellSize(squareDials: boolean) {
 
 /**
  * Upper bound for one grid cell, in px, from the dial-size setting. A MAXIMUM
- * only — nothing here imposes a minimum; that is the min-cell floor's job.
+ * only: nothing anywhere imposes a minimum, so the desk can always shrink far
+ * enough to show everything.
  */
 export function maxCellSize(
   dialSize: string,
@@ -167,8 +167,6 @@ export interface CanvasPlan {
   /** Whole pages the desk currently spans. */
   pagesX: number;
   pagesY: number;
-  /** True when the desk is larger than the window and has to scroll. */
-  overflow: boolean;
   /** Which regime produced this plan — useful for tests and for the UI. */
   mode: "pages" | "cropped";
 }
@@ -180,8 +178,6 @@ export interface ResolveCanvasOptions {
   logicalCell: number;
   /** Maximum cell size from the dial-size setting; may be Infinity. */
   capCell: number;
-  /** Cell size at which shrinking stops and the desk starts scrolling. */
-  minCell?: number;
   anchor?: DeskAnchor;
   /** Reference screen defining one page. */
   base?: { width: number; height: number };
@@ -201,7 +197,6 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
     availableHeight,
     logicalCell,
     capCell,
-    minCell = DEFAULT_MIN_CELL,
     anchor = "center",
     base = BASE_PAGE,
     fixed = null,
@@ -246,24 +241,19 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
     }
   }
 
-  // Zoom the resulting desk to fit, never magnifying past the dial-size cap.
+  // Zoom the resulting desk to fit. Capped above by the dial-size setting, and
+  // deliberately unbounded below: the whole desk is always visible, at whatever
+  // size that takes. The tiny floor is only there to keep the maths finite.
   const logical = canvasPixelSize(cols, rows, logicalCell);
   const capScale = capCell / logicalCell;
-  let scale = Math.min(
-    availableWidth / logical.width,
-    availableHeight / logical.height,
-    capScale,
+  const scale = Math.max(
+    0.001,
+    Math.min(
+      availableWidth / logical.width,
+      availableHeight / logical.height,
+      capScale,
+    ),
   );
-
-  // Stop shrinking at the minimum cell size; below that the desk scrolls rather
-  // than becoming too small to use.
-  const minScale = minCell / logicalCell;
-  let overflow = false;
-  if (scale < minScale) {
-    scale = minScale;
-    overflow = true;
-  }
-  scale = Math.max(scale, 0.001);
 
   // `|| 0` collapses -0, which is arithmetically fine but leaks into equality
   // checks and snapshots as a distinct value.
@@ -285,7 +275,6 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
     scale,
     pagesX,
     pagesY,
-    overflow,
     mode,
   };
 }

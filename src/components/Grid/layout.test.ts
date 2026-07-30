@@ -25,8 +25,6 @@ import {
 
 const LOGICAL_CELL = logicalCellSize(false);
 const CAP = maxCellSize("tiny", false, true, 1.6); // 12.125 * 0.4 * 16 = 77.6
-const MIN_CELL = 32;
-
 /** Icons in a 4x2 block at the origin, the shape used by most cases below. */
 const CONTENT = { cols: 4, rows: 2, minRow: 0, minCol: 0 };
 
@@ -37,7 +35,6 @@ function plan(width: number, height: number, overrides = {}) {
     availableHeight: height - 40,
     logicalCell: LOGICAL_CELL,
     capCell: CAP,
-    minCell: MIN_CELL,
     ...overrides,
   });
 }
@@ -166,7 +163,6 @@ describe("pages: at or above the base screen", () => {
   it("never shrinks icons below the cap while whole pages still fit", () => {
     const p = plan(1920, 1080);
     expect(p.cell).toBeCloseTo(CAP, 6);
-    expect(p.overflow).toBe(false);
   });
 });
 
@@ -208,23 +204,44 @@ describe("cropping: below the base screen", () => {
   });
 });
 
-describe("the minimum cell size", () => {
-  it("stops shrinking at the floor and lets the desk scroll instead", () => {
-    const huge = { cols: 40, rows: 20, minRow: 0, minCol: 0 };
-    const p = plan(360, 640, { content: huge });
-    expect(p.cell).toBeCloseTo(MIN_CELL, 6);
-    expect(p.overflow).toBe(true);
+describe("there is no lower bound on icon size", () => {
+  // The whole arrangement must stay visible on a phone, a MacBook, anything.
+  const SMALL = [
+    { name: "MacBook Air", width: 1440, height: 900 },
+    { name: "small window", width: 800, height: 600 },
+    { name: "phone portrait", width: 412, height: 915 },
+    { name: "small phone", width: 320, height: 480 },
+    { name: "absurd", width: 200, height: 200 },
+  ];
+
+  it("always shrinks enough to fit the whole desk on screen", () => {
+    const crowded = { cols: 40, rows: 20, minRow: 0, minCol: 0 };
+    SMALL.forEach((screen) => {
+      const p = plan(screen.width, screen.height, { content: crowded });
+      const { width, height } = canvasPixelSize(p.cols, p.rows, p.cell);
+      expect(width, `width on ${screen.name}`).toBeLessThanOrEqual(
+        screen.width - 40 + 1e-6,
+      );
+      expect(height, `height on ${screen.name}`).toBeLessThanOrEqual(
+        screen.height - 40 + 1e-6,
+      );
+    });
   });
 
-  it("does not scroll when everything fits above the floor", () => {
-    expect(plan(1920, 1080).overflow).toBe(false);
-    expect(plan(800, 600).overflow).toBe(false);
-    expect(plan(412, 915).overflow).toBe(false);
+  it("lets the cell go well below any icon-sized floor when it has to", () => {
+    const crowded = { cols: 40, rows: 20, minRow: 0, minCol: 0 };
+    const p = plan(320, 480, { content: crowded });
+    expect(p.cell).toBeGreaterThan(0);
+    expect(p.cell).toBeLessThan(20);
   });
 
-  it("honours a custom floor", () => {
-    const huge = { cols: 40, rows: 20, minRow: 0, minCol: 0 };
-    expect(plan(360, 640, { content: huge, minCell: 12 }).cell).toBeCloseTo(12, 6);
+  it("keeps every icon inside the desk even at the smallest sizes", () => {
+    const crowded = { cols: 40, rows: 20, minRow: 0, minCol: 0 };
+    SMALL.forEach((screen) => {
+      const p = plan(screen.width, screen.height, { content: crowded });
+      expect(p.cols, `cols on ${screen.name}`).toBeGreaterThanOrEqual(crowded.cols);
+      expect(p.rows, `rows on ${screen.name}`).toBeGreaterThanOrEqual(crowded.rows);
+    });
   });
 });
 

@@ -212,8 +212,6 @@ const defaultSettings = {
   basePageHeight: 1080,
   // Which corner (or centre) the content block is held against.
   deskAnchor: "center",
-  // Cell size at which shrinking stops and the desk scrolls instead.
-  minCellSize: 32,
   gridLayout: "full-screen",
   limitDialScale: true,
   maxColumns: "Unlimited",
@@ -258,9 +256,6 @@ export const settings = makeAutoObservable({
   deskAnchor:
     (storage[`${apiVersion}-desk-anchor`] as string) ??
     defaultSettings.deskAnchor,
-  minCellSize:
-    (storage[`${apiVersion}-min-cell-size`] as number) ??
-    defaultSettings.minCellSize,
   gridLayout: storage[`${apiVersion}-grid-layout`] || defaultSettings.gridLayout,
   limitDialScale:
     (storage[`${apiVersion}-limit-dial-scale`] as boolean) ??
@@ -393,12 +388,6 @@ export const settings = makeAutoObservable({
     browser.storage.local.set({ [`${apiVersion}-desk-anchor`]: value });
     settings.deskAnchor = value;
     bc.postMessage({ deskAnchor: value });
-  },
-  handleMinCellSize(value: number) {
-    const safe = Math.max(8, Math.min(160, Math.round(value) || 32));
-    browser.storage.local.set({ [`${apiVersion}-min-cell-size`]: safe });
-    settings.minCellSize = safe;
-    bc.postMessage({ minCellSize: safe });
   },
   handleMaxColumns(value: string) {
     browser.storage.local.set({ [`${apiVersion}-max-columns`]: value });
@@ -533,7 +522,6 @@ export const settings = makeAutoObservable({
       defaultSettings.basePageHeight,
     );
     settings.handleDeskAnchor(defaultSettings.deskAnchor);
-    settings.handleMinCellSize(defaultSettings.minCellSize);
     settings.handleMaxColumns(defaultSettings.maxColumns);
     settings.handleLimitDialScale(defaultSettings.limitDialScale);
     settings.handleMaxDialScale(defaultSettings.maxDialScale);
@@ -622,9 +610,6 @@ export const settings = makeAutoObservable({
           }
           if (Object.prototype.hasOwnProperty.call(backup, "deskAnchor")) {
             settings.handleDeskAnchor(backup.deskAnchor);
-          }
-          if (Object.prototype.hasOwnProperty.call(backup, "minCellSize")) {
-            settings.handleMinCellSize(backup.minCellSize);
           }
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {
             settings.handleMaxColumns(backup.maxColumns);
@@ -878,7 +863,6 @@ export const settings = makeAutoObservable({
       basePageWidth: settings.basePageWidth,
       basePageHeight: settings.basePageHeight,
       deskAnchor: settings.deskAnchor,
-      minCellSize: settings.minCellSize,
       gridLayout: settings.gridLayout,
       limitDialScale: settings.limitDialScale,
       maxColumns: settings.maxColumns,

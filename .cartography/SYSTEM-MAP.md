@@ -321,3 +321,28 @@ center → içerik bloğu her ekranda ortada · top-left → sol üst köşeye �
 
 Göreli ikon dizilimi 9 ekranın hepsinde BİREBİR aynı · büyük ekranlar tam sayı sayfa · konsol hatası yok.
 Testler: `layout.test.ts` 27 test (60/60 toplam) · `npm run build` yeşil · `tsc` 34 = baseline.
+
+### Düzeltme — MİNİMUM HÜCRE KALDIRILDI (2026-07-30, kullanıcı)
+"min icon size olmasın, icon size'ları küçülebilir, telefon ekranında da aynı koordinasyonları
+görebilmeliyim." → `minCellSize` ayarı + `CanvasPlan.overflow` + scroll yolu tamamen SİLİNDİ.
+Masa her zaman sığacak kadar zoom out eder; `overflow: hidden` sabit. Base 24" ve oradaki
+yerleşim (21×11 @ 77.6px) DEĞİŞMEDİ.
+
+**Canlı ölçüm (12 ekran, tek yükleme + sadece resize):**
+
+| ekran | cols×rows | sayfa | hücre | scroll | dizilim |
+|---|---|---|---|---|---|
+| 57" 5120×2160 | 63×22 | 3.00 | 70.87 | no | same |
+| 34" 3440×1440 | 42×11 | 2.00 | 71.22 | no | same |
+| 27" 2560×1440 | 21×11 | 1.00 | 77.60 | no | same |
+| **24" 1920×1080 BASE** | **21×11** | **1.00** | **77.60** | no | same |
+| MacBook Air 1440×900 | 15×9 | 0.71 | 77.60 | no | same |
+| laptop 1366×768 | 15×8 | 0.71 | 77.60 | no | same |
+| MacBook 13 1280×800 | 14×8 | 0.67 | 77.60 | no | same |
+| 1024×700 | 11×7 | 0.52 | 77.60 | no | same |
+| 800×600 | 11×6 | 0.52 | 61.29 | no | same |
+| telefon 412×915 | 11×10 | 0.52 | 30.00 | no | same |
+| telefon 390×844 | 11×9 | 0.52 | 28.23 | no | same |
+| 320×480 | 11×5 | 0.52 | **22.58** | no | same |
+
+Hiçbir ekranda kaydırma/kırpma yok · dizilim 12/12 birebir aynı · konsol hatası yok.

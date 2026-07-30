@@ -23,7 +23,6 @@ export const SettingsContent = observer(function SettingsContent() {
     handleDeskAnchor,
     handleDialSize,
     handleGridCanvas,
-    handleMinCellSize,
     handleGridLayout,
     handleLimitDialScale,
     handleMaxColumns,
@@ -322,39 +321,6 @@ export const SettingsContent = observer(function SettingsContent() {
                 <option value="top-left">Top left corner</option>
               </select>
               <CaretDown />
-            </div>
-          </div>
-
-          <div className="setting-wrapper setting-group">
-            <div className="setting-label">
-              <div className="setting-title" id="min-cell-title">
-                Minimum Icon Size
-              </div>
-              <div className="setting-description" id="min-cell-description">
-                How small icons may get before the desk starts scrolling instead
-                of shrinking further. Positions stay exactly as they are either
-                way &mdash; this only decides when to stop zooming out.
-              </div>
-            </div>
-            <div className="setting-option scale-limit-control">
-              <div
-                className="scale-slider-row"
-                style={{ display: "flex", alignItems: "center" }}
-              >
-                <input
-                  type="range"
-                  min={8}
-                  max={96}
-                  step={4}
-                  value={settings.minCellSize as number}
-                  onChange={(e) =>
-                    handleMinCellSize(parseInt(e.target.value, 10))
-                  }
-                  className="scale-slider"
-                  aria-label="Minimum icon cell size in pixels"
-                />
-                <span className="scale-value">{settings.minCellSize}px</span>
-              </div>
             </div>
           </div>
 

@@ -225,7 +225,6 @@ export const Grid = observer(function Grid() {
     scale: 1,
     pagesX: 1,
     pagesY: 1,
-    overflow: false,
     mode: "pages",
   }));
 
@@ -353,7 +352,6 @@ export const Grid = observer(function Grid() {
         settings.limitDialScale as boolean,
         settings.maxDialScale as number,
       ),
-      minCell: settings.minCellSize as number,
       anchor: settings.deskAnchor === "top-left" ? "top-left" : "center",
       base: {
         width: settings.basePageWidth as number,
@@ -372,7 +370,6 @@ export const Grid = observer(function Grid() {
       prev.rows === next.rows &&
       prev.offsetX === next.offsetX &&
       prev.offsetY === next.offsetY &&
-      prev.overflow === next.overflow &&
       Math.abs(prev.scale - next.scale) < 0.0005
         ? prev
         : next,
@@ -388,7 +385,6 @@ export const Grid = observer(function Grid() {
     settings.gridRows,
     settings.limitDialScale,
     settings.maxDialScale,
-    settings.minCellSize,
     settings.squareDials,
   ]);
 
@@ -1862,8 +1858,8 @@ useEffect(() => {
           // a FIXED relationship, which is what stops it appearing to drift.
           alignItems: anchorAtCorner ? "flex-start" : "center",
           justifyContent: anchorAtCorner ? "flex-start" : "center",
-          // Only scrolls once the desk has hit the minimum cell size.
-          overflow: plan.overflow ? "auto" : "hidden",
+          // Never scrolls: the desk always zooms far enough to fit.
+          overflow: "hidden",
           padding: "20px",
           boxSizing: "border-box",
         }}
