@@ -51,9 +51,7 @@ function savePanelBookmarks(panelBookmarks: any[]): boolean {
   try {
     const dataToSave = JSON.stringify(panelBookmarks);
     localStorage.setItem(PANEL_BOOKMARKS_KEY, dataToSave);
-    
-    console.log('Panel bookmarks saved:', panelBookmarks.length, 'items');
-    
+
     // Verify save worked
     const saved = localStorage.getItem(PANEL_BOOKMARKS_KEY);
     if (!saved || saved !== dataToSave) {
@@ -81,7 +79,6 @@ function loadPanelBookmarks(): any[] {
     const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      console.log('Loaded panel bookmarks:', parsed.length, 'items');
       // Re-based to the origin on the way in. Empty rows and columns the
       // arrangement had drifted away from are released here: that is what makes
       // area claimed in an earlier session go inactive again, and what keeps
@@ -255,20 +252,10 @@ export const Grid = observer(function Grid() {
   const dragImageRef = useRef<HTMLElement | null>(null);
 
   const isRootSafe = useMemo(() => {
-    const hasValidFolder = bookmarks.currentFolder?.id;
     const hasDefaultFolder = settings.defaultFolder !== undefined;
-    const isDefaultFolder = hasDefaultFolder && bookmarks.currentFolder.id === settings.defaultFolder;
-    const hasNoParent = !bookmarks.parentId;
-    
-    const result = isDefaultFolder || hasNoParent;
-    
-    console.log('isRoot calculation:', {
-      hasValidFolder,
-      hasDefaultFolder, 
-      isDefaultFolder,
-      hasNoParent,
-      result
-    });
+    const isDefaultFolder =
+      hasDefaultFolder && bookmarks.currentFolder.id === settings.defaultFolder;
+    const result = isDefaultFolder || !bookmarks.parentId;
     
     return result;
   }, [bookmarks.currentFolder?.id, settings.defaultFolder, bookmarks.parentId]);
@@ -636,7 +623,6 @@ export const Grid = observer(function Grid() {
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === PANEL_BOOKMARKS_KEY && e.newValue !== e.oldValue) {
-        console.log('Panel bookmarks changed in another tab');
         if (e.newValue) {
           try {
             const newBookmarks = JSON.parse(e.newValue);

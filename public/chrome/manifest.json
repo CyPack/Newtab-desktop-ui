@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "New Tab Desktop UI",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "A customizable new tab extension that turns your bookmarks into a desktop-style grid dashboard with drag & drop layout.",
   "permissions": [
     "favicon",
