@@ -494,3 +494,24 @@ kare 10×10 · telefon 10×22. Grid her şekilde ekranı dolduruyor.
 | **yeniden yükle** | **11×8** | **77.6px** | 2,9 | **ALAN SERBEST** |
 
 58 test PASS · build yeşil · tsc **34 = baseline** · konsol hatası yok.
+
+### Drop geri bildirimi ölçekten bağımsız (f4161e3)
+Masa `transform: scale(~0.32)` ile çizildiği için 2px'lik drop çerçevesi ekranda **0.6px**'e
+düşüyordu — büyük ekranda pratikte görünmez. Çizgi kalınlıkları ve yarıçaplar artık zoom'a
+bölünüyor (`--desk-scale` custom property + `calc(2.5px / var(--desk-scale))`), ekranda sabit
+2.5px. `--desk-scale` aynı zamanda **hangi build'in çalıştığını** anlamanın en hızlı yolu:
+```js
+getComputedStyle(document.querySelector('[data-panel="full-screen-panel"]'))
+  .getPropertyValue('--desk-scale') ? 'YENİ' : 'ESKİ'
+```
+
+### Canlı doğrulama — görünür pencerede, gerçek fare (2026-07-30)
+`~/projects/click-bridge/tools/dev-browser.sh http://localhost:5173` (CDP :9222) →
+playwright `connectOverCDP`. Sonuç: masa 1780×555 / pencere 1824×595 (ekranı dolduruyor) ·
+grid 35×11 · hücre 45px · sol-üstten (0,0) sağ-alt uca (10,34) **tek hamlede** sürükleme,
+gösterge yol boyunca takip etti, bırakma hedefe indi, konsol temiz.
+
+> ⚠️ **Playwright ile native drag:** `mouse.down()` sonrası ÖNCE küçük bir dürtme
+> (`mouse.move(x+12, y+12)`) şart — doğrudan hedefe atlarsan `dragstart` HİÇ tetiklenmez ve
+> gösterge "hiç çıkmıyor" sanılır. Ayrıca sürükleme ortasında `page.screenshot()` almak
+> native drag'i kesiyor (gösterge donmuş görünür). İkisi de teşhiste yanlış iz sürdürdü.
