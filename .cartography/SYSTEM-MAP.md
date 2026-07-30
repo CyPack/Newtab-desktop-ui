@@ -377,3 +377,61 @@ giderler — o da masa boyutuna bağlı olduğu için **desen ekrandan ekrana DE
 27"/24"→1(21×11, 77.6px) · MBA1440→21×11@58.8 · 1366→55.7 · 1280→52.1 · 1024→41.3 · 800→31.9 ·
 412→15.6 · 390→14.7 · 320→**11.8px**. Dizilim 12/12 birebir aynı · scroll/kırpma yok · konsol temiz.
 62 test PASS · build yeşil · tsc 34 = baseline.
+
+---
+
+## 🖱️ İKON TAŞIMA — PRODUCTION-GRADE UX (2026-07-30)
+
+**Şikâyet:** "ikonu sol üst köşedeki boşluğa direkt taşıyamadım, adım adım taşıdım; her taşıdığımda
+diğerleri bir uzaklaştı ve küçüldü gibi geldi."
+
+### Kök neden 1 (asıl) — merkezleme CANLI içerik kutusundan türetiliyordu
+`offsetX = floor((desk.cols − content.cols) / 2)`. İçerik 3 kolon, masa 16 → offsetX=6.
+Bir ikonu 2 hücre sağa taşı → içerik 5 kolon → offsetX=5 → **TÜM ikonlar 1 hücre sola kayar.**
+Testle kanıtlandı (6 → 5). Demo'da görünmüyordu çünkü tetris deseni sayfayı tam dolduruyor,
+bbox sabit kalıyor; **derli toplu bir blokta** ise her taşımada tetikleniyor.
+
+→ **ÇÖZÜM: offset TAMAMEN KALDIRILDI.** Kayıtlı hücre = masadaki hücre. Merkezleme artık
+masanın pencere içindeki hizasıyla (`deskAnchor`, saf CSS) yapılıyor — hiçbir ikon etkileyemez.
+`CanvasPlan.offsetX/offsetY` ve `toStored()` yok. `content` artık sadece **kapsama tabanı**
+(`maxCol+1`), shrink-wrap değil.
+
+### Kök neden 2 — hücreler arası boşluk hiçbir drop hedefine ait değildi
+Gap'e bırakma slot handler'larını ıskalıyor, `.FullScreenViewport`'a baloncuklanıp
+`handleDropOnPanelEnd` → `findEmptySlot` ile ikonu **ilk boş hücreye ışınlıyordu**.
+→ **ÇÖZÜM:** tek masa-seviyesi `dragover`/`drop`; hedef hücre **işaretçi koordinatından**
+hesaplanıyor (`cellUnderPointer`, transform ölçeği hesaba katılır), kenar dışı **kenetlenir**.
+Masanın her pikseli geçerli ve öngörülebilir hedef. Slot başına handler + `stopPropagation` kalktı.
+
+### Kök neden 3 — kırpma düzenleme sırasında masayı nefes aldırıyordu
+Kırpma tasarım gereği içeriğe bağlı; her taşımada masa büyüyüp küçülüyordu.
+→ **ÇÖZÜM: sticky sizing.** Masa yalnız **pencere** değişince yeniden kırpılır
+(`lastViewportRef`); aynı pencerede asla küçülmez, sadece kapsama için büyür.
+
+### Ayrıca temizlendi
+- `addFolderHoverListeners`/`cleanupFolderListeners`/`isInDragZone` **SİLİNDİ**: drag başında
+  her ikona 2 dinleyici bağlıyor, her `dragover`'da `[draggable="true"]:hover` dahil 2 document
+  sorgusu koşuyordu (ikon sayısıyla ağırlaşan jank) — üstelik hiç üretilmeyen `.sortable-chosen`
+  sınıfına bakıyordu, yani klasör vurgusu **hiç çalışmıyordu**.
+- `* { user-select: none }` global reset → `.FullScreenViewport, .Grid` ile scope'landı
+  (ayar paneli ve modallarda metin seçimini de kapatıyordu).
+
+### Canlı drop göstergesi (üç sonuç ayrı okunur)
+| Nereye | Niyet | Görsel |
+|---|---|---|
+| boş hücre | `move` | beyaz ince çerçeve (sakin — hiçbir şey yerinden olmuyor) |
+| dolu hücre | `swap` | **amber** çerçeve+dolgu (başka bir ikon da hareket edecek) |
+| klasörün **ortası** (%60) | `folder` | **yeşil** + klasör %8 büyür (kap açılıyor) |
+| klasörün **kenarı** | `swap` | amber — klasörle yer değiştir |
+Sürüklenen ikon `opacity .35` ile soluklaşır (göz sürükleme görüntüsünü takip etsin).
+
+### Doğrulama (canlı, sentetik DragEvent + gerçek dragTo)
+- gösterge 7/7 doğru hücreyi işaretledi (merkez · gap · köşe · uzak · kenar-dışı kenetleme) ·
+  `dragend` sonrası temizleniyor
+- niyet ayrımı 4/4 semantik doğru (boş=move · dolu=swap · klasör-ortası=folder · klasör-kenarı=swap)
+- **tek uzun sürükleme** uzak boş hücreye: doğru hücre, **diğer 23 ikon 0 hareket**
+- **gap'e bırakma**: en yakın hücreye indi (ışınlanma YOK), diğerleri 0 hareket
+- **4 ardışık sürükleme**: her adımda doğru hücre, hücre boyutu 77.6px sabit, diğerleri 0 hareket
+- **swap** uçtan uca: A↔B yer değiştirdi, diğer 24 ikon 0 hareket
+- sayfa/ölçek garantileri korundu: 12 ekranda dizilim aynı, scroll yok
+- 63 test PASS · build yeşil · tsc **34 = baseline**

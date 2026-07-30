@@ -169,13 +169,6 @@ function normalizeUrl(url: string): string {
   }
 }
 
-function isInDragZone(x: number, width: number) {
-  const zoneWidth = width * dropZonePercent;
-  const start = (width - zoneWidth) / 2;
-  const end = start + zoneWidth;
-  return x >= start && x <= end;
-}
-
 interface ExtendedDragEvent extends React.DragEvent {
   originalEvent?: DragEvent;
 }
@@ -187,6 +180,8 @@ export const Grid = observer(function Grid() {
   const bottomLeftGridRef = useRef<HTMLDivElement>(null);
   const bottomRightGridRef = useRef<HTMLDivElement>(null);
   const bottomFullGridRef = useRef<HTMLDivElement>(null);
+  // The transformed desk itself; pointer maths is done against its box.
+  const fullScreenGridRef = useRef<HTMLDivElement>(null);
   const breadcrumbsRef = useRef<HTMLDivElement>(null);
 
   // State
@@ -220,8 +215,6 @@ export const Grid = observer(function Grid() {
   const [plan, setPlan] = useState<CanvasPlan>(() => ({
     cols: 10,
     rows: 6,
-    offsetX: 0,
-    offsetY: 0,
     cell: 80,
     scale: 1,
     pagesX: 1,
@@ -229,14 +222,31 @@ export const Grid = observer(function Grid() {
     mode: "pages",
   }));
 
-  // Bounds for the STORED coordinate space (the plan is in rendered space).
+  // Where the icon being dragged would land, and what dropping there would do.
+  // Drives the live indicator, so the outcome is visible before letting go.
+  const [dropTarget, setDropTarget] = useState<{
+    row: number;
+    col: number;
+    intent: "move" | "swap" | "folder";
+  } | null>(null);
+  // The desk must not re-plan mid-drag: a grid that resizes under the pointer
+  // makes the drop land somewhere other than where it was aimed.
+  const isDraggingRef = useRef(false);
+  const recalculatePlanRef = useRef<(() => void) | null>(null);
+  // The desk is re-cropped when the WINDOW changes, not when the icons do.
+  // Cropping is content-derived by design, so without this the desk would
+  // breathe on every drag: place an icon one column further out and everything
+  // shrinks a little, pull it back and everything grows again. Sticky sizing
+  // keeps it still while the user is arranging things.
+  const lastViewportRef = useRef({ width: 0, height: 0 });
+
   const canvas = useMemo(
-    () => ({
-      cols: Math.max(1, plan.cols - plan.offsetX),
-      rows: Math.max(1, plan.rows - plan.offsetY),
-    }),
-    [plan.cols, plan.rows, plan.offsetX, plan.offsetY],
+    () => ({ cols: plan.cols, rows: plan.rows }),
+    [plan.cols, plan.rows],
   );
+  // Read inside recalculatePlan without making it depend on the plan itself.
+  const planRef = useRef(plan);
+  planRef.current = plan;
   const [targetSlotIndex, setTargetSlotIndex] = useState<{ row: number; col: number } | null>(null);
 
   // Refs for drag state
@@ -336,14 +346,23 @@ export const Grid = observer(function Grid() {
   // is cropped away before any icon shrinks. See Grid/layout.ts.
   const recalculatePlan = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
+    if (isDraggingRef.current) return;
 
     const { availableWidth, availableHeight } = measureGridArea(
       bottomFullGridRef.current,
     );
     if (availableWidth <= 0 || availableHeight <= 0) return;
 
-    const next = resolveCanvas({
-      content: contentExtent(panelBookmarks),
+    const extent = contentExtent(panelBookmarks);
+    const viewportChanged =
+      lastViewportRef.current.width !== availableWidth ||
+      lastViewportRef.current.height !== availableHeight;
+    lastViewportRef.current = { width: availableWidth, height: availableHeight };
+
+    const options = {
+      // How far icons reach from the origin — a floor for the desk, never a
+      // shrink-wrap. This is what keeps one icon's move from moving the rest.
+      content: { cols: extent.maxCol + 1, rows: extent.maxRow + 1 },
       availableWidth,
       availableHeight,
       logicalCell: logicalCellSize(settings.squareDials as boolean),
@@ -353,7 +372,6 @@ export const Grid = observer(function Grid() {
         settings.limitDialScale as boolean,
         settings.maxDialScale as number,
       ),
-      anchor: settings.deskAnchor === "top-left" ? "top-left" : "center",
       base: {
         width: settings.basePageWidth as number,
         height: settings.basePageHeight as number,
@@ -363,14 +381,25 @@ export const Grid = observer(function Grid() {
           ? { cols: settings.gridCols as number, rows: settings.gridRows as number }
           : null,
       squareDials: settings.squareDials as boolean,
-    });
+    };
+
+    let next = resolveCanvas(options);
+    if (!viewportChanged) {
+      // Same window: hold the desk at least as large as it already is, so
+      // rearranging icons can grow it but never shrink it under the pointer.
+      const held = {
+        cols: Math.max(next.cols, planRef.current.cols),
+        rows: Math.max(next.rows, planRef.current.rows),
+      };
+      if (held.cols !== next.cols || held.rows !== next.rows) {
+        next = resolveCanvas({ ...options, fixed: held });
+      }
+    }
 
     // Ignore imperceptible churn so a ResizeObserver storm can't loop.
     setPlan((prev) =>
       prev.cols === next.cols &&
       prev.rows === next.rows &&
-      prev.offsetX === next.offsetX &&
-      prev.offsetY === next.offsetY &&
       Math.abs(prev.scale - next.scale) < 0.0005
         ? prev
         : next,
@@ -379,7 +408,6 @@ export const Grid = observer(function Grid() {
     panelBookmarks,
     settings.basePageHeight,
     settings.basePageWidth,
-    settings.deskAnchor,
     settings.dialSize,
     settings.gridCols,
     settings.gridLayout,
@@ -539,6 +567,7 @@ export const Grid = observer(function Grid() {
 
   // Effects
   useEffect(() => {
+    recalculatePlanRef.current = recalculatePlan;
     recalculatePlan();
 
     const gridEl = bottomFullGridRef.current;
@@ -1276,7 +1305,7 @@ useEffect(() => {
         } catch {}
       }
 
-      addFolderHoverListeners();
+      isDraggingRef.current = true;
       addBreadcrumbListeners();
     },
     []
@@ -1287,60 +1316,24 @@ useEffect(() => {
       try { document.body.removeChild(dragImageRef.current); } catch {}
       dragImageRef.current = null;
     }
-    
-    cleanupFolderListeners();
+
     cleanupBreadcrumbListeners();
     clearAllDragStyles();
+    setDropTarget(null);
     draggedRef.current = null;
+    // Re-plan now that the desk is free to change again.
+    isDraggingRef.current = false;
+    recalculatePlanRef.current?.();
   }, [clearAllDragStyles]);
 
   // Folder operations
-  const addFolderHoverListeners = useCallback(() => {
-    const sortableItems = document.querySelectorAll("[data-id]");
-    sortableItems?.forEach((item: any) => {
-      const handleDragOver = (e: Event) => {
-        const dragEvent = e as DragEvent;
-        const draggedItem = document.querySelector(".sortable-chosen") || 
-                           document.querySelector("[draggable='true']:hover");
-        
-        if (draggedItem && draggedItem !== item) {
-          const rect = item.getBoundingClientRect();
-          const x = dragEvent.clientX - rect.left;
-          const width = rect.width;
-
-          if (isInDragZone(x, width) && item.getAttribute("data-type") === "folder") {
-            const targetId = item.getAttribute("data-id");
-            const d = draggedRef.current;
-            if (d && d.id === targetId) return;
-            item.classList.add("folder-drop-target");
-          } else {
-            item.classList.remove("folder-drop-target");
-          }
-        }
-      };
-
-      const handleDragLeave = (e: Event) => {
-        const dragEvent = e as DragEvent;
-        if (!item.contains(dragEvent.relatedTarget as Node)) {
-          item.classList.remove("folder-drop-target");
-        }
-      };
-
-      item.addEventListener("dragover", handleDragOver);
-      item.addEventListener("dragleave", handleDragLeave);
-      (item as any)._folderCleanup = () => {
-        item.removeEventListener("dragover", handleDragOver);
-        item.removeEventListener("dragleave", handleDragLeave);
-      };
-    });
-  }, []);
-
-  const cleanupFolderListeners = useCallback(() => {
-    const sortableItems = document.querySelectorAll("[data-id]");
-    sortableItems?.forEach((item: any) => {
-      if (item._folderCleanup) item._folderCleanup();
-    });
-  }, []);
+  // The old per-icon dragover listeners are gone. They attached two handlers to
+  // every icon on the desk at drag start, and each dragover ran two document
+  // queries — one of them `[draggable="true"]:hover` — which made dragging
+  // heavier the more icons you had. They also keyed off a `.sortable-chosen`
+  // class that nothing in this codebase ever sets, so folder highlighting never
+  // actually worked. Folder targeting is now derived from the cell under the
+  // pointer, in one place, with no listeners and no layout queries.
 
   const addBreadcrumbListeners = useCallback(() => {
     const breadcrumbElement = breadcrumbsRef.current;
@@ -1792,27 +1785,20 @@ useEffect(() => {
 
   const renderFullScreenPanel = () => {
     const list = getBookmarksByPanel("full-screen-panel");
-    const { cols, rows, offsetX, offsetY, scale } = plan;
+    const { cols, rows, scale } = plan;
     // The desk is laid out ONCE at its logical size and zoomed by a single
     // transform, so nothing about the arrangement depends on the window.
     const logicalCell = logicalCellSize(settings.squareDials as boolean);
     const logicalGap = logicalCell * GAP_RATIO;
     const logical = canvasPixelSize(cols, rows, logicalCell);
 
-    // Stored coordinates are the source of truth; rendered coordinates are just
-    // those shifted by the current desk offset. Every handler below converts
-    // back before touching state, so what is saved never depends on the window.
-    const toStored = (row: number, col: number) => ({
-      row: row - offsetY,
-      col: col - offsetX,
-    });
-
-    // Build occupied map, keyed in RENDERED space.
+    // A stored cell is simply a cell on the desk — no offset, nothing derived
+    // from where the other icons happen to be.
     const occupiedMap = new Map<string, any>();
     const spare: any[] = [];
     list.forEach((bm) => {
-      const row = (bm.row ?? 0) + offsetY;
-      const col = (bm.col ?? 0) + offsetX;
+      const row = bm.row ?? 0;
+      const col = bm.col ?? 0;
       const inBounds = row >= 0 && col >= 0 && row < rows && col < cols;
       const key = inBounds ? coordToKey(row, col) : "";
       if (inBounds && !occupiedMap.has(key)) {
@@ -1841,7 +1827,7 @@ useEffect(() => {
 
     const handleSlotDoubleClick = (row: number, col: number) => {
       if (!occupiedMap.has(coordToKey(row, col))) {
-        setTargetSlotIndex(toStored(row, col));
+        setTargetSlotIndex({ row, col });
         targetPanelRef.current = "full-screen-panel";
         openModalForPanel("full-screen-panel");
       }
@@ -1850,11 +1836,86 @@ useEffect(() => {
     const handleSlotRightClick = (e: React.MouseEvent, row: number, col: number) => {
       e.preventDefault();
       if (!occupiedMap.has(coordToKey(row, col))) {
-        setTargetSlotIndex(toStored(row, col));
+        setTargetSlotIndex({ row, col });
       }
     };
 
     const anchorAtCorner = settings.deskAnchor === "top-left";
+
+    // Which cell is under the pointer, and what dropping there would do.
+    //
+    // Worked out from coordinates rather than from per-cell drop targets: the
+    // gaps between cells belong to no cell, so a drop landing in one used to
+    // miss every target, bubble up to the panel and send the icon to the first
+    // free cell instead of where it was aimed. Rounding the pointer to the
+    // nearest cell makes every pixel of the desk a valid, predictable target.
+    const cellUnderPointer = (clientX: number, clientY: number) => {
+      const grid = fullScreenGridRef.current;
+      if (!grid) return null;
+      const rect = grid.getBoundingClientRect();
+      const step = (logicalCell + logicalGap) * scale;
+      if (step <= 0) return null;
+      const clamp = (value: number, max: number) =>
+        Math.max(0, Math.min(max, value));
+      // Clamped, not rejected: a drop just past the edge snaps to the nearest
+      // cell rather than silently doing nothing.
+      const col = clamp(Math.floor((clientX - rect.left) / step), cols - 1);
+      const row = clamp(Math.floor((clientY - rect.top) / step), rows - 1);
+
+      const occupant = occupiedMap.get(coordToKey(row, col));
+      const dragged = draggedRef.current;
+      // Dropping onto the middle of a folder files the icon inside it; the
+      // edges of the same cell still mean "put it here", so a folder never
+      // becomes a place you cannot drop next to.
+      const withinCell = (clientX - rect.left) / step - col;
+      const overFolderCore =
+        occupant?.type === "folder" &&
+        occupant.id !== dragged?.id &&
+        Math.abs(withinCell - 0.5) < dropZonePercent / 2;
+
+      return {
+        row,
+        col,
+        intent: overFolderCore
+          ? ("folder" as const)
+          : occupant && occupant.id !== dragged?.id
+            ? ("swap" as const)
+            : ("move" as const),
+        occupant,
+      };
+    };
+
+    const handleDeskDragOver = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const target = cellUnderPointer(e.clientX, e.clientY);
+      setDropTarget((prev) =>
+        !target
+          ? null
+          : prev &&
+              prev.row === target.row &&
+              prev.col === target.col &&
+              prev.intent === target.intent
+            ? prev
+            : { row: target.row, col: target.col, intent: target.intent },
+      );
+    };
+
+    const handleDeskDrop = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropTarget(null);
+      const target = cellUnderPointer(e.clientX, e.clientY);
+      const dragged = draggedRef.current;
+      if (!target || !dragged) return;
+
+      if (target.intent === "folder" && target.occupant) {
+        moveBookmarkToFolder(dragged.id, target.occupant.id);
+        draggedRef.current = null;
+        return;
+      }
+      handleDropOnSlot(e, target.row, target.col);
+    };
 
     return (
       <div
@@ -1922,11 +1983,22 @@ useEffect(() => {
           } as React.CSSProperties
         }
         data-panel="full-screen-panel"
+        ref={fullScreenGridRef}
+        // One drop target for the whole desk. Cells are worked out from the
+        // pointer, so the gaps between them are live too.
+        onDragOver={handleDeskDragOver}
+        onDrop={handleDeskDrop}
       >
-        {cells.map(({ row, col, bm }) => (
+        {cells.map(({ row, col, bm }) => {
+          const isTarget =
+            dropTarget?.row === row && dropTarget?.col === col;
+          return (
           <div
             key={`slot-${row}-${col}`}
-            className="grid-slot"
+            className={clsx(
+              "grid-slot",
+              isTarget && `drop-target drop-${dropTarget.intent}`,
+            )}
             data-slot-row={row}
             data-slot-col={col}
             style={{
@@ -1935,33 +2007,8 @@ useEffect(() => {
               position: 'relative',
               minHeight: 0,
               minWidth: 0,
-              transition: 'all 0.2s ease',
               borderRadius: '8px',
               cursor: bm ? 'grab' : 'pointer',
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.dataTransfer.dropEffect = 'move';
-            }}
-            onDragEnter={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.currentTarget.classList.add('drag-over-slot');
-            }}
-            onDragLeave={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                e.currentTarget.classList.remove('drag-over-slot');
-              }
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.currentTarget.classList.remove('drag-over-slot');
-              const target = toStored(row, col);
-              handleDropOnSlot(e, target.row, target.col);
             }}
             onDoubleClick={() => handleSlotDoubleClick(row, col)}
             onContextMenu={(e) => handleSlotRightClick(e, row, col)}
@@ -1973,17 +2020,18 @@ useEffect(() => {
                 data-current-row={row}
                 data-current-col={col}
                 draggable
-                onDragStart={(e) => {
-                  // Carry the STORED coordinate, so a drop compares like with like.
-                  handleDragStart(e, "full-screen-panel", toStored(row, col), bm.id);
-                }}
+                onDragStart={(e) => handleDragStart(e, "full-screen-panel", { row, col }, bm.id)}
                 onDragEnd={handleDragEnd}
+                className={clsx(draggedRef.current?.id === bm.id && "is-dragging")}
                 style={{
-                  transition: 'all 0.2s ease',
                   borderRadius: '8px',
                   cursor: 'grab',
                   width: '100%',
                   height: '100%',
+                  // Left interactive so a drag can start here. Dragover events
+                  // bubble to the desk, which is why the per-slot handlers —
+                  // and their stopPropagation, the thing that actually broke
+                  // drops in the gaps — are gone rather than replaced.
                   pointerEvents: 'auto',
                 }}
               >
@@ -1991,7 +2039,8 @@ useEffect(() => {
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
       </div>
       </div>
@@ -2092,61 +2141,84 @@ useEffect(() => {
   };
 
   const dragStyles = `
-    .drag-over {
-      background: rgba(99, 102, 241, 0.1) !important;
-      border: 2px dashed rgba(99, 102, 241, 0.5) !important;
-      transform: scale(0.95);
-      border-radius: 8px !important;
+    /* Drop feedback. The three possible outcomes look different on purpose:
+       "put it here", "swap with this one" and "file it inside this folder" are
+       materially different results, and the user has to be able to tell which
+       one they are about to get while the pointer is still down. */
+
+    .grid-slot.drop-target::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 10px;
+      pointer-events: none;
+      transition: background-color 0.12s ease, box-shadow 0.12s ease;
     }
-    
-    .drag-over-panel {
-      background: rgba(99, 102, 241, 0.05) !important;
-      border: 2px dashed rgba(99, 102, 241, 0.3) !important;
+
+    /* Move into an empty cell — a quiet outline, since nothing is displaced. */
+    .grid-slot.drop-move::after {
+      background: rgba(255, 255, 255, 0.08);
+      box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55);
     }
-    
-    .drag-over-slot {
-      background: rgba(99, 102, 241, 0.15) !important;
-      border: 2px dashed rgba(99, 102, 241, 0.5) !important;
-      transform: scale(1.02);
+
+    /* Swap with the icon already there — amber, because something else moves
+       too, and that deserves a warmer, more attention-getting cue. */
+    .grid-slot.drop-swap::after {
+      background: rgba(234, 179, 8, 0.16);
+      box-shadow: inset 0 0 0 2px rgba(234, 179, 8, 0.85);
     }
-    
-    .folder-drop-target {
-      background: rgba(34, 197, 94, 0.1) !important;
-      border: 2px dashed rgba(34, 197, 94, 0.5) !important;
-      transform: scale(1.05);
-      box-shadow: 0 0 20px rgba(34, 197, 94, 0.3) !important;
+
+    /* File inside a folder — green, and the folder swells slightly to read as
+       a container opening rather than a cell being occupied. */
+    .grid-slot.drop-folder::after {
+      background: rgba(34, 197, 94, 0.18);
+      box-shadow: inset 0 0 0 2px rgba(34, 197, 94, 0.9);
     }
-    
+    .grid-slot.drop-folder > * {
+      transform: scale(1.08);
+      transition: transform 0.12s ease;
+    }
+
+    /* The icon being carried fades, so the eye follows the drag image. */
+    .is-dragging {
+      opacity: 0.35;
+    }
+
+    .grid-slot:empty:hover {
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 8px;
+    }
+
     .breadcrumb-drop-target {
       background: rgba(234, 179, 8, 0.1) !important;
       border: 2px dashed rgba(234, 179, 8, 0.5) !important;
       border-radius: 8px !important;
       padding: 8px 16px !important;
     }
-    
-    .grid-slot:empty:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px dashed rgba(255, 255, 255, 0.2);
+
+    .drag-over {
+      background: rgba(99, 102, 241, 0.1) !important;
+      border: 2px dashed rgba(99, 102, 241, 0.5) !important;
+      border-radius: 8px !important;
     }
-    
-    .grid-slot:empty:active {
-      background: rgba(255, 255, 255, 0.1);
+
+    .drag-over-panel {
+      background: rgba(99, 102, 241, 0.05) !important;
+      border: 2px dashed rgba(99, 102, 241, 0.3) !important;
     }
-    
+
     [draggable="true"] {
-      cursor: grab !important;
+      cursor: grab;
     }
-    
-    [draggable="true"]:hover:not(.drag-over):not(.folder-drop-target) {
-      transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    }
-    
+
     [draggable="true"]:active {
-      cursor: grabbing !important;
+      cursor: grabbing;
     }
-    
-    * {
+
+    /* Scoped to the desk: a global user-select reset also disabled selection in
+       the settings panel and every modal. */
+    .FullScreenViewport,
+    .Grid {
       user-select: none;
     }
   `;

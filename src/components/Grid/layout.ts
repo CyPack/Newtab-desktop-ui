@@ -22,8 +22,16 @@
  *
  * Throughout, the content block itself is RIGID: icons never rearrange relative
  * to each other. Only the empty desk around them, and the zoom, respond to the
- * screen. Everything here is pure — no DOM, no store — so that promise is
- * testable.
+ * screen.
+ *
+ * Note what is deliberately absent: nothing here shifts icons to keep them
+ * centred. An earlier version centred the content's bounding box inside the
+ * desk, which meant dragging one icon outward re-centred every other icon —
+ * direct manipulation moved things the user hadn't touched. A stored cell is
+ * now simply a cell on the desk, and centring is done by placing the whole desk
+ * in the window (see the desk anchor), which no single icon can influence.
+ *
+ * Everything here is pure — no DOM, no store — so these promises are testable.
  */
 
 /** Gap between cells, expressed as a fraction of the cell size. */
@@ -155,12 +163,9 @@ export function pageSize(
 }
 
 export interface CanvasPlan {
-  /** Rendered grid size, in cells. */
+  /** Rendered grid size, in cells. A stored cell renders at that same cell. */
   cols: number;
   rows: number;
-  /** stored coordinate + offset = rendered coordinate. */
-  offsetX: number;
-  offsetY: number;
   /** Rendered cell size in px, and the transform that produces it. */
   cell: number;
   scale: number;
@@ -172,13 +177,16 @@ export interface CanvasPlan {
 }
 
 export interface ResolveCanvasOptions {
-  content: { cols: number; rows: number; minRow: number; minCol: number };
+  /**
+   * How far the icons reach from the origin, in cells — `maxCol + 1` by
+   * `maxRow + 1`. Used only as a floor, so the desk always contains them.
+   */
+  content: { cols: number; rows: number };
   availableWidth: number;
   availableHeight: number;
   logicalCell: number;
   /** Maximum cell size from the dial-size setting; may be Infinity. */
   capCell: number;
-  anchor?: DeskAnchor;
   /** Reference screen defining one page. */
   base?: { width: number; height: number };
   /** Explicit canvas set by the user; bypasses the page/crop logic entirely. */
@@ -197,7 +205,6 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
     availableHeight,
     logicalCell,
     capCell,
-    anchor = "center",
     base = BASE_PAGE,
     fixed = null,
     squareDials = false,
@@ -249,6 +256,10 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
         Math.max(page.rows, contentRows),
       );
     }
+
+    // Whatever the regime decided, the desk must contain every icon.
+    cols = Math.max(cols, contentCols);
+    rows = Math.max(rows, contentRows);
   }
 
   // Zoom the resulting desk to fit. Capped above by the dial-size setting, and
@@ -265,22 +276,9 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
     ),
   );
 
-  // `|| 0` collapses -0, which is arithmetically fine but leaks into equality
-  // checks and snapshots as a distinct value.
-  const offsetX =
-    (anchor === "center"
-      ? Math.floor((cols - contentCols) / 2) - content.minCol
-      : -content.minCol) || 0;
-  const offsetY =
-    (anchor === "center"
-      ? Math.floor((rows - contentRows) / 2) - content.minRow
-      : -content.minRow) || 0;
-
   return {
     cols,
     rows,
-    offsetX,
-    offsetY,
     cell: logicalCell * scale,
     scale,
     pagesX,
