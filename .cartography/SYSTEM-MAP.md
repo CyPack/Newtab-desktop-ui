@@ -802,3 +802,79 @@ page PASS · drag 0/23 · release PASS · backup 8/8 · roundtrip 8/8 · profile
 **KAPSAM DIŞI (bilinçli):** ekran ölçüsüne göre otomatik profil değişimi · profil dosyası
 dışa/içe aktarma · profil başına duvar kağıdı. `screenHint` saklanıyor ama **hiçbir şeyi
 tetiklemiyor** — yanlış tahmin masayı yeniden düzenler, bu da özelliğin sözünü bozar.
+
+---
+
+## Yükseltme köprüsü — eski masadan yeni sürüme geçiş (2026-07-30)
+
+Profiller canlıya alınmadan önce gereken katman: **eski (profilsiz) bir dünyadan yeni sürüme
+geçiş.** Kullanıcı üretim kullanımına başlayacağı için bu yol tesadüfe bırakılamaz.
+
+### Önce iki şüphe — ikisi de ÖLÇÜLDÜ, ikisi de YANLIŞ çıktı
+
+| şüphe | ölçüm | sonuç |
+|---|---|---|
+| Profilsiz yedek geri yüklenince, mevcut profilin konumları üstüne yazar mı? | işaretli ikon (7,13) restore sonrası **7,13** | **HAYIR** — `setPanelBookmarksData` → `savePanelBookmarks` → `syncActive` restore edilen konumları profile yazıyor, projeksiyon no-op oluyor |
+| Yedeğin `dialSize`'ı yok sayılıp makinenin ayarı mı uygulanır? | yedek `large` → profil **136px** | **HAYIR** — `resetSettings` profil anahtarını sildiği için doğru değer türetiliyor |
+
+> Uydurma kusur düzeltilmedi. Ama ikisi de **tesadüfen** çalışıyordu (`resetSettings`'in silme
+> sırasına bağlı). Sessizce bozulabilecek bir bağımlılık → dönüşüm **açık** hâle getirildi.
+
+### Kurulan köprü — üç parça
+
+**1. Tek dönüşüm fonksiyonu.** `storeFromArrangement()` hem yerinde göçün hem eski-dosya
+geri yüklemesinin ortak gövdesi. İki ayrı implementasyon zamanla ayrışır ve **aynı girdiden
+farklı masa** üretmeye başlar (TP-U2 bunu çiviliyor).
+
+**2. Açık eski-yedek dönüşümü.** `isLegacyBackup()` "bu dosya kullanılabilir profil veriyor mu?"
+sorusunu sorar — sürüm numarasına değil **sonuca** bakar (boş `profiles: []` de legacy sayılır).
+Legacy ise profil **dosyanın kendisinden** kurulur: dizilimi + `dialSize`/`squareDials`/
+`limitDialScale`/`maxDialScale` alanları. Makinenin o anki ayarından değil.
+
+**3. Adlandırılmış geri dönüş noktası.** Yerinde göç, profil deposunu yazmadan **ÖNCE**
+`pre-profiles-upgrade` etiketli snapshot alır. `ensureStore`'dan önce: yazma başarısız olsa bile
+snapshot alınmış olur.
+
+### Ölçümün yakaladığı gerçek kusur — etiket yutulması
+
+`pre-profiles-upgrade` snapshot'ı **hiç kaydedilmiyordu.** Sebep: eski sayfa kapanırken alınan
+`page-hidden` snapshot'ı aynı dizilimi taşıyor → `recordSnapshot`'ın tekrar-önleyicisi
+`skipped-unchanged` diyor.
+
+> **Ders:** tekrar-önleme rutin snapshot için doğru, **kilometre taşı** snapshot için yanlıştır.
+> Onun değeri yeniliği değil **etiketidir**; içeriğin bir öncekiyle aynı olması zaten beklenen
+> durumdur. `allowDuplicate` seçeneği eklendi (varsayılan `false`).
+
+Aynı kusur `pruneLegacyBackups`'ın `adopted-legacy-backup` kaydında da vardı — veri korunuyordu
+ama **provenance** kayboluyordu. O da düzeltildi.
+
+### Doğrulama — `nt-upgrade.mjs`, 9/9
+
+Masaya (7,13) gibi hiçbir otomatik yerleşimin koymayacağı bir **işaret** konuluyor, böylece
+"çalıştı" ile "makul bir şey yeniden kurdu" karışmıyor.
+
+```
+A · YERİNDE
+  A1 dizilim yükseltmeden sağ çıktı        marker 7,13 · 26 ikon
+  A2 tek profil o dizilimle oluştu          78px · marker {7,13}
+  A3 adlandırılmış geri dönüş noktası var   pre-profiles-upgrade, page-hidden
+  A4 nokta YÜKSELTME ÖNCESİ masayı tutuyor  26 ikon · marker 7,13
+  A5 ikinci yükleme tekrar yükseltmiyor     1 profil · marker 7,13
+
+B · DOSYADAN
+  B0 restore öncesi masa karıştırıldı       0,0
+  B1 eski yedek dizilimini birebir getirdi  marker 7,13
+  B2 ona bir profil sentezlendi             marker {7,13}
+  B3 ölçek DOSYADAN geldi, makineden değil  136px (dosya "large"), makine "tiny"(78px)
+```
+
+```
+122 birim test PASS (115 -> +7) · build ✓ · tsc 34 = baseline
+page PASS · drag 0/23 · backup 8/8 · roundtrip 8/8 · profiles 13/13 · upgrade 9/9
+```
+
+### Geri dönüş yolu (downgrade)
+
+`panel-bookmarks` **hiç değişmedi** — yeni sürüm onu aktif profilin yansıması olarak tutuyor.
+Eski build'e dönülürse `desk-profiles` anahtarını yok sayar ve dizilim olduğu gibi çalışır.
+Yükseltme tek yönlü bir kapı değildir.

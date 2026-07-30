@@ -408,6 +408,32 @@ export function ensureStore(
   const existing = readStore(storage);
   if (existing) return { store: existing, migrated: false, persisted: true };
 
+  const store = storeFromArrangement({
+    arrangement: options.arrangement,
+    cellSize: options.defaultCellSize,
+    name: options.name,
+    screenHint: options.screenHint,
+    now: options.now,
+  });
+
+  return { store, migrated: true, persisted: writeStore(storage, store) };
+}
+
+/**
+ * Builds a single-profile store around an arrangement.
+ *
+ * Shared by the in-place upgrade and by the restore of a backup written before
+ * profiles existed. Both are the same conversion — an arrangement plus a size
+ * becomes a profile — and having one function do it means the two paths cannot
+ * drift apart and start producing different desks from the same input.
+ */
+export function storeFromArrangement(options: {
+  arrangement?: BookmarkLike[];
+  cellSize: number;
+  name?: string;
+  screenHint?: { width: number; height: number };
+  now?: number;
+}): ProfileStore {
   const positions: Record<string, ProfilePosition> = {};
   if (Array.isArray(options.arrangement)) {
     for (const bm of options.arrangement) {
@@ -422,17 +448,31 @@ export function ensureStore(
 
   const profile = createProfileObject({
     name: options.name ?? DEFAULT_PROFILE_NAME,
-    cellSize: options.defaultCellSize,
+    cellSize: options.cellSize,
     positions,
     screenHint: options.screenHint,
     now: options.now,
   });
 
-  const store: ProfileStore = {
-    version: PROFILES_VERSION,
-    activeId: profile.id,
-    profiles: [profile],
-  };
+  return { version: PROFILES_VERSION, activeId: profile.id, profiles: [profile] };
+}
 
-  return { store, migrated: true, persisted: writeStore(storage, store) };
+/**
+ * True for a backup that cannot supply a usable profile store.
+ *
+ * That covers a file written before profiles existed — an arrangement and a
+ * dial size, no profiles — and also one carrying an empty profile list, which
+ * is no more usable. Both have to be converted, or the desk gets rebuilt from
+ * whatever profile happened to be lying around, which is a different desk than
+ * the one the user backed up.
+ *
+ * The test is deliberately for a usable RESULT rather than for a version
+ * number: a file is legacy if it does not answer the question, not if it
+ * carries a particular label.
+ */
+export function isLegacyBackup(backup: unknown): boolean {
+  if (!backup || typeof backup !== "object") return false;
+  const b = backup as { deskProfiles?: { profiles?: unknown } };
+  const profiles = b.deskProfiles?.profiles;
+  return !Array.isArray(profiles) || profiles.length === 0;
 }

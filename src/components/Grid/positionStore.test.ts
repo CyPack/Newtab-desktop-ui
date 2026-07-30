@@ -232,3 +232,31 @@ describe("the old write-only dated backups are retired", () => {
     expect(JSON.parse(store.getItem("panel-bookmarks") ?? "[]")).toHaveLength(3);
   });
 });
+
+describe("a milestone snapshot is kept even when nothing changed", () => {
+  // The page-hide snapshot taken on the way out of the old build holds the same
+  // arrangement as the upgrade marker taken moments later. Deduplicating would
+  // throw away the one entry whose whole value is its name.
+  it("records an identical arrangement when explicitly allowed", () => {
+    const store = new FakeStorage();
+    const same = arrangement(4);
+    recordSnapshot(store, same, { reason: "page-hidden", force: true });
+    expect(
+      recordSnapshot(store, [...same], {
+        reason: "pre-profiles-upgrade",
+        force: true,
+        allowDuplicate: true,
+      }),
+    ).toBe("recorded");
+    const history = readHistory(store);
+    expect(history[0].reason).toBe("pre-profiles-upgrade");
+    expect(history.map((s) => s.reason)).toContain("page-hidden");
+  });
+
+  it("still deduplicates by default, so routine saves stay cheap", () => {
+    const store = new FakeStorage();
+    const same = arrangement(4);
+    recordSnapshot(store, same, { force: true });
+    expect(recordSnapshot(store, [...same], { force: true })).toBe("skipped-unchanged");
+  });
+});

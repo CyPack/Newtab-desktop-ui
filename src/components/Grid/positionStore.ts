@@ -118,6 +118,16 @@ export interface RecordOptions {
   reason?: string;
   /** Bypasses the interval throttle — used when the page is going away. */
   force?: boolean;
+  /**
+   * Bypasses the identical-content check too.
+   *
+   * For routine snapshots, recording the same arrangement twice is waste. For a
+   * MILESTONE one — "this is the desk immediately before the upgrade" — the
+   * value is the label, not the novelty, and the content being identical to the
+   * previous entry is exactly what you would expect. Without this, the marker
+   * is silently swallowed by the very snapshot it was meant to outlive.
+   */
+  allowDuplicate?: boolean;
   now?: number;
   minIntervalMs?: number;
 }
@@ -144,6 +154,7 @@ export function recordSnapshot(
   const {
     reason = "change",
     force = false,
+    allowDuplicate = false,
     now = Date.now(),
     minIntervalMs = SNAPSHOT_MIN_INTERVAL_MS,
   } = options;
@@ -154,7 +165,11 @@ export function recordSnapshot(
     const history = readHistory(store);
     const newest = history[0];
 
-    if (newest && JSON.stringify(newest.data) === JSON.stringify(data)) {
+    if (
+      !allowDuplicate &&
+      newest &&
+      JSON.stringify(newest.data) === JSON.stringify(data)
+    ) {
       return "skipped-unchanged";
     }
     if (!force && newest && now - newest.at < minIntervalMs) {
@@ -225,6 +240,11 @@ export function pruneLegacyBackups(store: StorageLike, now = Date.now()): PruneR
         const outcome = recordSnapshot(store, data, {
           reason: "adopted-legacy-backup",
           force: true,
+          // Same reasoning as the upgrade marker: this entry earns its place by
+          // recording WHERE the data came from. If the desk has not changed
+          // since, the content is identical to the newest snapshot and the
+          // default deduplication would drop the provenance on the floor.
+          allowDuplicate: true,
           now: at,
         });
         if (outcome === "recorded") result.adopted = data.length;

@@ -44,6 +44,7 @@ import {
   renameProfile,
   setActiveProfile,
   setCellSize,
+  readStore as readProfileStore,
   syncActive,
   writeStore as writeProfileStore,
 } from "./deskProfiles";
@@ -106,11 +107,48 @@ function profiles(seed?: any[]): ProfileStore {
   if (!profileStore) {
     const arrangement =
       Array.isArray(seed) && seed.length > 0 ? seed : storedArrangement();
-    profileStore = ensureStore(localStorage, {
+
+    /*
+     * Upgrade bridge, part one: a labelled rollback point.
+     *
+     * This runs exactly once per browser profile — the first time a build with
+     * profiles meets a desk that predates them. Snapshotting first means the
+     * pre-upgrade arrangement is recoverable by name rather than by hoping a
+     * routine `layout-change` entry happens to still be in the ring. Forced,
+     * because the five-minute throttle would otherwise swallow it on a busy
+     * session, which is precisely when it would be most wanted.
+     *
+     * It is deliberately BEFORE ensureStore: if writing the profile store were
+     * to fail, the snapshot has already been taken.
+     */
+    if (!readProfileStore(localStorage) && arrangement.length > 0) {
+      recordSnapshot(localStorage, arrangement, {
+        reason: "pre-profiles-upgrade",
+        force: true,
+        // The page-hide snapshot taken moments ago on the way out holds the
+        // same desk, so without this the marker is discarded as unchanged.
+        allowDuplicate: true,
+      });
+    }
+
+    const result = ensureStore(localStorage, {
       defaultCellSize: currentCeiling(),
       arrangement,
       screenHint: { width: window.innerWidth, height: window.innerHeight },
-    }).store;
+    });
+    profileStore = result.store;
+
+    if (result.migrated) {
+      const created = result.store.profiles[0];
+      console.log(
+        `Upgraded to desk profiles: ${
+          Object.keys(created.positions).length
+        } icons into "${created.name}" at ${created.cellSize}px.` +
+          (result.persisted
+            ? " Previous arrangement kept as a pre-profiles-upgrade snapshot."
+            : " WARNING: the profile store could not be saved (storage full)."),
+      );
+    }
   }
   return profileStore;
 }

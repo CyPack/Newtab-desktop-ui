@@ -8,9 +8,12 @@ import { mockBookmarks } from "#stores/useBookmarks/mockBookmarks";
 import { recordSnapshot } from "#components/Grid/positionStore";
 import {
   PROFILES_KEY,
+  isLegacyBackup,
   readStore as readProfileStore,
+  storeFromArrangement,
   writeStore as writeProfileStore,
 } from "#components/Grid/deskProfiles";
+import { maxCellSize, referenceCellSize } from "#components/Grid/layout";
 
 // ==================================================================
 // SETUP
@@ -649,10 +652,43 @@ export const settings = makeAutoObservable({
 
           // Restored before the arrangement below, so that whichever profile
           // the backup had active is the one the incoming positions land in.
-          if (backup.deskProfiles && Array.isArray(backup.deskProfiles.profiles)) {
+          if (!isLegacyBackup(backup)) {
             writeProfileStore(localStorage, backup.deskProfiles);
             console.log(
               "Restored", backup.deskProfiles.profiles.length, "desk profile(s)",
+            );
+          } else if (Array.isArray(backup.panelBookmarks)) {
+            /*
+             * Upgrade bridge: a backup written before profiles existed.
+             *
+             * The profile is built from the FILE — its arrangement and its dial
+             * size — not from whatever the browser happens to hold right now.
+             * That distinction is the whole point of doing this explicitly:
+             * without it the conversion depends on resetSettings having already
+             * cleared the profile key, which is true today and is exactly the
+             * kind of incidental ordering that breaks silently later.
+             */
+            const cap = maxCellSize(
+              (backup.dialSize as string) ?? (settings.dialSize as string),
+              (backup.squareDials as boolean) ?? (settings.squareDials as boolean),
+              (backup.limitDialScale as boolean) ?? (settings.limitDialScale as boolean),
+              (backup.maxDialScale as number) ?? (settings.maxDialScale as number),
+            );
+            const converted = storeFromArrangement({
+              arrangement: backup.panelBookmarks,
+              // An unlimited "scale to fit" cap is not a size anyone can be
+              // given; fall back to the reference cell the page maths uses.
+              cellSize: Number.isFinite(cap)
+                ? cap
+                : referenceCellSize(cap, (backup.squareDials as boolean) ?? false),
+              screenHint: backup.gridDimensions ? undefined : undefined,
+            });
+            writeProfileStore(localStorage, converted);
+            console.log(
+              "Upgraded a pre-profiles backup:",
+              Object.keys(converted.profiles[0].positions).length,
+              "icons into one profile at",
+              converted.profiles[0].cellSize + "px",
             );
           }
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {

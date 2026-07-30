@@ -12,6 +12,8 @@ import {
   deleteProfile,
   duplicateProfile,
   ensureStore,
+  isLegacyBackup,
+  storeFromArrangement,
   isEmptyProfile,
   project,
   readStore,
@@ -429,5 +431,67 @@ describe("TP-M: migrating a single desk into the first profile", () => {
     const read = readStore(storage);
     expect(read?.profiles[0].cellSize).toBe(120);
     expect(read?.profiles[0].positions.c).toEqual({ row: 9, col: 2 });
+  });
+});
+
+describe("TP-U: the upgrade bridge from a pre-profiles world", () => {
+  const arrangement = [dial("a", 0, 0), dial("b", 4, 11), dial("c", 9, 2)];
+
+  // A file with no profiles is the signature of a backup written before they
+  // existed. Restoring it has to synthesise one, or the desk is rebuilt from
+  // whatever profile happened to be lying around — a different desk than the
+  // one that was backed up.
+  it("TP-U1 · recognises a backup that predates profiles", () => {
+    expect(isLegacyBackup({ backupVersion: "2.2", panelBookmarks: arrangement })).toBe(true);
+    expect(isLegacyBackup({ deskProfiles: { profiles: [] } })).toBe(true);
+    expect(isLegacyBackup(null)).toBe(false);
+    expect(
+      isLegacyBackup({ deskProfiles: { profiles: [makeProfile("A")] } }),
+    ).toBe(false);
+  });
+
+  // One conversion function serves both the in-place upgrade and the restore of
+  // an old file. Two implementations would eventually produce two different
+  // desks from the same input.
+  it("TP-U2 · builds the same store the in-place migration would", () => {
+    const storage = new FakeStorage();
+    const migrated = ensureStore(storage, {
+      defaultCellSize: 136,
+      arrangement,
+      now: 1_000,
+    }).store;
+    const converted = storeFromArrangement({
+      arrangement,
+      cellSize: 136,
+      now: 1_000,
+    });
+
+    expect(converted.profiles[0].positions).toEqual(migrated.profiles[0].positions);
+    expect(converted.profiles[0].cellSize).toBe(migrated.profiles[0].cellSize);
+    expect(converted.profiles[0].name).toBe(migrated.profiles[0].name);
+    expect(converted.activeId).toBe(converted.profiles[0].id);
+  });
+
+  // The size has to come from the FILE, not from the browser. A backup taken at
+  // a large dial size must come back large, whatever the machine restoring it
+  // happens to be set to.
+  it("TP-U3 · takes the size it is given rather than a default", () => {
+    expect(storeFromArrangement({ arrangement, cellSize: 136 }).profiles[0].cellSize).toBe(136);
+    expect(storeFromArrangement({ arrangement, cellSize: 48 }).profiles[0].cellSize).toBe(48);
+  });
+
+  it("TP-U4 · converts a file with nothing placed into a usable empty profile", () => {
+    const converted = storeFromArrangement({ arrangement: [], cellSize: 78 });
+    expect(converted.profiles).toHaveLength(1);
+    expect(converted.profiles[0].positions).toEqual({});
+    expect(activeProfile(converted).id).toBe(converted.profiles[0].id);
+  });
+
+  it("TP-U4b · ignores panel-layout entries in an old file", () => {
+    const converted = storeFromArrangement({
+      arrangement: [...arrangement, { id: "p", panel: "top-left", index: 2 }],
+      cellSize: 78,
+    });
+    expect(Object.keys(converted.profiles[0].positions).sort()).toEqual(["a", "b", "c"]);
   });
 });
