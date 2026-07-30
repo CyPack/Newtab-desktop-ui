@@ -376,43 +376,151 @@
   }
 }
 
-/* Desk Zoom — a continuous multiplier on the dial-size ceiling. Shares the
-   slider look with Maximum Scale Limit, adds a readout because the control has
-   a range in which it deliberately stops having a visible effect. */
-.desk-zoom-control {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-end;
+/* Desk profiles.
+   Reads as a container of related controls rather than a single setting, so it
+   gets its own inset surface — otherwise the size slider, the preview and the
+   three buttons all float at the same level as the neighbouring switches and
+   the grouping has to be inferred.
+
+   It also breaks the side-by-side label/control layout the other settings use.
+   The reference dial is drawn at its true size, up to 320px, and the narrow
+   right-hand column cannot hold that — capping it would defeat the one thing
+   the preview is for. Stacking gives it the full width of the panel. */
+.setting-wrapper.setting-group.desk-profile-group {
+  display: block;
 }
 
-.desk-zoom-row {
+.desk-profile-group .setting-label {
+  margin-bottom: 14px;
+}
+.desk-profile-control {
   display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: stretch;
+  min-width: 260px;
+  padding: 14px;
+  border-radius: 10px;
+  background-color: rgba(128, 128, 128, 0.08);
+}
+
+.color-scheme-dark .desk-profile-control {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.desk-profile-row {
+  display: flex;
+  gap: 8px;
   align-items: center;
 }
 
-.desk-zoom-slider {
-  width: 180px;
+.desk-profile-select,
+.desk-profile-name {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.desk-zoom-readout {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
+.desk-profile-add {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+}
+
+.desk-profile-size-label {
+  display: block;
   font-size: 0.8125rem;
   opacity: 0.75;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+  margin-bottom: 4px;
 }
 
-.desk-zoom-note {
-  max-width: 240px;
-  opacity: 0.85;
-  font-style: italic;
+.desk-profile-size-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.desk-zoom-reset {
-  padding: 4px 10px;
+.desk-profile-slider {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.desk-profile-preview {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  /* The preview cell is drawn at its true size, which at the top of the range
+     is wider than the space beside it. Wrapping lets the readout drop under it
+     rather than being pushed out of the panel. */
+  flex-wrap: wrap;
+}
+
+/* Deliberately unscaled: this is the one thing in the panel that is the size it
+   claims to be, which is what makes it useful to look at. */
+.desk-profile-preview-cell {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 8px;
+  border: 1px dashed rgba(128, 128, 128, 0.5);
+  overflow: hidden;
+}
+
+.desk-profile-preview-icon {
+  border-radius: 12px;
+  background-color: rgba(240, 240, 240, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.desk-profile-preview-title {
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background-color: rgba(240, 240, 240, 0.4);
+  color: #000;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.color-scheme-dark .desk-profile-preview-title {
+  background-color: rgba(55, 55, 55, 0.75);
+  color: #eee;
+}
+
+.desk-profile-readout {
+  flex: 1 1 160px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  padding-top: 2px;
+}
+
+.desk-profile-note {
+  opacity: 0.7;
+  font-style: italic;
+  line-height: 1.35;
+}
+
+.desk-profile-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.desk-profile-actions .btn {
+  padding: 5px 12px;
+  font-size: 0.8125rem;
+}
+
+.desk-profile-actions .btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

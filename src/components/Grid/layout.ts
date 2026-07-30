@@ -60,18 +60,6 @@ export const DIAL_SIZE_EM: Record<string, number> = {
  */
 export const CAPTURE_FALLBACK_EM = 1.6;
 
-/**
- * Bounds for the desk zoom — the continuous multiplier on the dial-size
- * ceiling.
- *
- * It is a ceiling, not a size: turning it up lets cells grow until the active
- * area is what limits them, turning it down shrinks them and brings more empty
- * grid into view. Neither direction can push anything off screen, because the
- * fit calculation still has the last word.
- */
-export const DESK_ZOOM_MIN = 0.4;
-export const DESK_ZOOM_MAX = 2.5;
-
 export type DeskAnchor = "center" | "top-left";
 
 /** Cell width in em units, per the --dial-width-value custom property. */
@@ -97,23 +85,12 @@ export function maxCellSize(
   squareDials: boolean,
   limitScale: boolean,
   maxScale: number,
-  /**
-   * Desk zoom. Applied here, to the ceiling, rather than to the resolved cell:
-   * that is what keeps it from becoming a floor. Turn it up and cells grow only
-   * as far as the active area still fits; turn it down and they shrink, which
-   * brings more empty grid into view without moving a single icon.
-   * An unlimited cap stays unlimited — Infinity has nothing to scale.
-   */
-  zoom = 1,
 ) {
   const width = dialWidthValue(squareDials);
-  const factor = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   if (dialSize === "scale") {
-    return limitScale ? width * maxScale * BASE_FONT_SIZE * factor : Infinity;
+    return limitScale ? width * maxScale * BASE_FONT_SIZE : Infinity;
   }
-  return (
-    width * (DIAL_SIZE_EM[dialSize] ?? DIAL_SIZE_EM.tiny) * BASE_FONT_SIZE * factor
-  );
+  return width * (DIAL_SIZE_EM[dialSize] ?? DIAL_SIZE_EM.tiny) * BASE_FONT_SIZE;
 }
 
 /** A cap of Infinity can't size a page; fall back to the classic 1.6em ceiling. */

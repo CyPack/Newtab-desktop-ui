@@ -6,7 +6,6 @@ import browser from "webextension-polyfill";
 
 import { mockBookmarks } from "#stores/useBookmarks/mockBookmarks";
 import { recordSnapshot } from "#components/Grid/positionStore";
-import { DESK_ZOOM_MAX, DESK_ZOOM_MIN } from "#components/Grid/layout";
 
 // ==================================================================
 // SETUP
@@ -238,10 +237,6 @@ const defaultSettings = {
   basePageHeight: 1080,
   // Which corner (or centre) the content block is held against.
   deskAnchor: "center",
-  // Continuous multiplier on the dial-size ceiling. 1 is the ceiling the chosen
-  // dial size implies; below that everything shrinks and more empty grid comes
-  // into view, above it icons grow until the active area is what limits them.
-  deskZoom: 1,
   gridLayout: "full-screen",
   limitDialScale: true,
   maxColumns: "Unlimited",
@@ -286,8 +281,6 @@ export const settings = makeAutoObservable({
   deskAnchor:
     (storage[`${apiVersion}-desk-anchor`] as string) ??
     defaultSettings.deskAnchor,
-  deskZoom:
-    (storage[`${apiVersion}-desk-zoom`] as number) ?? defaultSettings.deskZoom,
   gridLayout: storage[`${apiVersion}-grid-layout`] || defaultSettings.gridLayout,
   limitDialScale:
     (storage[`${apiVersion}-limit-dial-scale`] as boolean) ??
@@ -420,18 +413,6 @@ export const settings = makeAutoObservable({
     browser.storage.local.set({ [`${apiVersion}-desk-anchor`]: value });
     settings.deskAnchor = value;
     bc.postMessage({ deskAnchor: value });
-  },
-  // Scales the dial-size ceiling rather than the icons directly, so it stays a
-  // ceiling: the desk still shrinks below it whenever the active area demands
-  // it, and nothing is ever pushed off screen or made to scroll.
-  handleDeskZoom(value: number) {
-    const safe = Math.max(
-      DESK_ZOOM_MIN,
-      Math.min(DESK_ZOOM_MAX, Number.isFinite(value) ? value : 1),
-    );
-    browser.storage.local.set({ [`${apiVersion}-desk-zoom`]: safe });
-    settings.deskZoom = safe;
-    bc.postMessage({ deskZoom: safe });
   },
   handleMaxColumns(value: string) {
     browser.storage.local.set({ [`${apiVersion}-max-columns`]: value });
@@ -566,7 +547,6 @@ export const settings = makeAutoObservable({
       defaultSettings.basePageHeight,
     );
     settings.handleDeskAnchor(defaultSettings.deskAnchor);
-    settings.handleDeskZoom(defaultSettings.deskZoom);
     settings.handleMaxColumns(defaultSettings.maxColumns);
     settings.handleLimitDialScale(defaultSettings.limitDialScale);
     settings.handleMaxDialScale(defaultSettings.maxDialScale);
@@ -655,9 +635,6 @@ export const settings = makeAutoObservable({
           }
           if (Object.prototype.hasOwnProperty.call(backup, "deskAnchor")) {
             settings.handleDeskAnchor(backup.deskAnchor);
-          }
-          if (Object.prototype.hasOwnProperty.call(backup, "deskZoom")) {
-            settings.handleDeskZoom(backup.deskZoom);
           }
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {
             settings.handleMaxColumns(backup.maxColumns);
@@ -934,7 +911,6 @@ export const settings = makeAutoObservable({
       basePageWidth: settings.basePageWidth,
       basePageHeight: settings.basePageHeight,
       deskAnchor: settings.deskAnchor,
-      deskZoom: settings.deskZoom,
       gridLayout: settings.gridLayout,
       limitDialScale: settings.limitDialScale,
       maxColumns: settings.maxColumns,

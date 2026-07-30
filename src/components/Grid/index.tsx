@@ -18,6 +18,7 @@ import {
   type CanvasPlan,
   canvasPixelSize,
   contentExtent,
+  fitCount,
   logicalCellSize,
   maxCellSize,
   normalizeFullScreenCoords,
@@ -108,6 +109,36 @@ export function activeDeskCellSize(): number {
 
 export function readDeskProfiles(): ProfileStore {
   return profiles();
+}
+
+/**
+ * Lays every icon out in a compact block from the origin, at a given cell size.
+ *
+ * A new profile needs SOME arrangement — the bookmarks exist and have to be
+ * somewhere — but inheriting the outgoing profile's one defeats the purpose:
+ * that arrangement typically spans the whole screen, which pins the cell size
+ * to whatever fits it and leaves the new profile's size control inert. A block
+ * at the origin reaches only as far as it needs to, so the size the user just
+ * chose is the size they get.
+ *
+ * This is also what the Tidy button runs. It is deliberately an explicit action
+ * rather than something that happens whenever the size changes: re-flowing
+ * icons behind the user's back is exactly the reflow this whole architecture
+ * exists to abolish.
+ */
+export function compactBlock(
+  list: any[],
+  cellSize: number,
+  container: HTMLElement | null,
+): any[] {
+  const { availableWidth } = measureGridArea(container);
+  const cols = Math.max(1, fitCount(Math.max(1, availableWidth), Math.max(1, cellSize)));
+  let placed = 0;
+  return list.map((bm) => {
+    if (!bm || bm.panel !== "full-screen-panel") return bm;
+    const index = placed++;
+    return { ...bm, row: Math.floor(index / cols), col: index % cols };
+  });
 }
 
 /**
@@ -905,7 +936,16 @@ export const Grid = observer(function Grid() {
       deskProfiles: {
         read: () => readDeskProfiles(),
 
+        // The high-water mark exists so that tidying icons inward MID-EDIT does
+        // not make the whole desk jump larger. A profile boundary is not an
+        // edit — it is a different desk — so carrying the previous profile's
+        // reach across it would pin the new one to a size it never asked for.
+        _resetReach: () => {
+          activeAreaRef.current = { cols: 0, rows: 0 };
+        },
+
         switch: (id: string) => {
+          activeAreaRef.current = { cols: 0, rows: 0 };
           const next = switchDeskProfile(id, panelBookmarks);
           if (next) {
             setPanelBookmarks(next);
@@ -920,17 +960,29 @@ export const Grid = observer(function Grid() {
             cellSize,
             screenHint: { width: window.innerWidth, height: window.innerHeight },
           });
-          // A new profile is empty, so the desk it switches to is empty too.
-          // That is deliberate: it is the one moment when the size can be set
-          // freely, because there is no arrangement for it to disturb.
           updateDeskProfiles(addProfile(readDeskProfiles(), profile));
-          const projected = normalizeFullScreenCoords(
-            project(readDeskProfiles(), panelBookmarks),
+          activeAreaRef.current = { cols: 0, rows: 0 };
+          // Start from a compact block rather than the outgoing arrangement.
+          // Inheriting it would hand the new profile a desk that already spans
+          // the screen, which pins the cell size and leaves the size control
+          // with nothing to do — the opposite of what a fresh profile is for.
+          const fresh = normalizeFullScreenCoords(
+            compactBlock(panelBookmarks, cellSize, bottomFullGridRef.current),
           );
-          setPanelBookmarks(projected);
-          if (isRootSafe) savePanelBookmarks(projected);
+          setPanelBookmarks(fresh);
+          if (isRootSafe) savePanelBookmarks(fresh);
           setDeskCellSize(activeDeskCellSize());
           return profile.id;
+        },
+
+        tidy: () => {
+          activeAreaRef.current = { cols: 0, rows: 0 };
+          const fresh = normalizeFullScreenCoords(
+            compactBlock(panelBookmarks, activeDeskCellSize(), bottomFullGridRef.current),
+          );
+          setPanelBookmarks(fresh);
+          if (isRootSafe) savePanelBookmarks(fresh);
+          setDeskCellSize(activeDeskCellSize());
         },
 
         rename: (id: string, name: string) => {
@@ -948,6 +1000,7 @@ export const Grid = observer(function Grid() {
           if (after === before) return false;
           updateDeskProfiles(after);
           if (before.activeId === id) {
+            activeAreaRef.current = { cols: 0, rows: 0 };
             const projected = normalizeFullScreenCoords(project(after, panelBookmarks));
             setPanelBookmarks(projected);
             if (isRootSafe) savePanelBookmarks(projected);

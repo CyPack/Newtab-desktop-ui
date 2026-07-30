@@ -7,16 +7,11 @@ import "./styles.css";
 import { About } from "#components/About";
 import { ColorPicker } from "#components/ColorPicker";
 import { CaretDown } from "#components/icons/CaretDown.tsx";
-import {
-  DESK_ZOOM_MAX,
-  DESK_ZOOM_MIN,
-  logicalCellSize,
-  maxCellSize,
-} from "#components/Grid/layout";
 import { wallpapers } from "#lib/wallpapers";
 import { bookmarks } from "#stores/useBookmarks";
 import { colorPicker } from "#stores/useColorPicker";
 import { settings } from "#stores/useSettings";
+import { DeskProfiles } from "./DeskProfiles.tsx";
 import { Switch } from "./Switch.tsx";
 
 export const SettingsContent = observer(function SettingsContent() {
@@ -27,7 +22,6 @@ export const SettingsContent = observer(function SettingsContent() {
     handleDefaultFolder,
     handleBasePage,
     handleDeskAnchor,
-    handleDeskZoom,
     handleDialSize,
     handleGridCanvas,
     handleGridLayout,
@@ -55,50 +49,6 @@ export const SettingsContent = observer(function SettingsContent() {
     (settings.gridCols as number) > 0 && (settings.gridRows as number) > 0;
   const canvasCols = fixedDesk ? (settings.gridCols as number) : 14;
   const canvasRows = fixedDesk ? (settings.gridRows as number) : 7;
-
-  // The ceiling the zoom asks for, and what the desk actually settled on.
-  //
-  // These are not always the same number, and the difference is the whole
-  // reason the readout exists: zoom raises a CEILING, so once the active area
-  // is what limits the cell size, dragging the slider further does nothing
-  // visible. Without saying so, that reads as a broken control.
-  const zoomedCap = maxCellSize(
-    settings.dialSize as string,
-    settings.squareDials as boolean,
-    settings.limitDialScale as boolean,
-    settings.maxDialScale as number,
-    settings.deskZoom as number,
-  );
-  const [actualCell, setActualCell] = useState<number | null>(null);
-
-  useEffect(() => {
-    // Settings open as a modal over the live desk, so it can be measured. On
-    // the standalone options page there is no desk, and the readout falls back
-    // to the ceiling on its own.
-    const read = () => {
-      const grid = document.querySelector('[data-panel="full-screen-panel"]');
-      if (!grid) return setActualCell(null);
-      const scale = parseFloat(
-        getComputedStyle(grid).getPropertyValue("--desk-scale") || "",
-      );
-      const logical = logicalCellSize(settings.squareDials as boolean);
-      setActualCell(Number.isFinite(scale) ? scale * logical : null);
-    };
-    // One frame later: the desk re-renders in response to the same change.
-    const id = requestAnimationFrame(read);
-    return () => cancelAnimationFrame(id);
-  }, [
-    settings.deskZoom,
-    settings.dialSize,
-    settings.gridCols,
-    settings.gridRows,
-    settings.limitDialScale,
-    settings.maxDialScale,
-    settings.squareDials,
-  ]);
-
-  const cappedByDesk =
-    actualCell !== null && Number.isFinite(zoomedCap) && actualCell < zoomedCap - 1;
 
   const wallpaperColors = [
     "Dark",
@@ -595,77 +545,7 @@ export const SettingsContent = observer(function SettingsContent() {
           <CaretDown />
         </div>
       </div>
-      {settings.gridLayout === "full-screen" && (
-        <div className="setting-wrapper setting-group desk-zoom-group">
-          <div className="setting-label">
-            <div className="setting-title" id="desk-zoom-title">
-              Desk Zoom
-            </div>
-            <div className="setting-description" id="desk-zoom-description">
-              Scale everything on the desk at once &mdash; icons, labels and the
-              spacing between them. Nothing changes position: an icon in the
-              third column stays in the third column, it just gets bigger or
-              smaller along with the grid. Zoom out and more empty grid comes
-              into view to place icons in.
-            </div>
-          </div>
-          <div className="setting-option desk-zoom-control">
-            <div className="desk-zoom-row">
-              <input
-                type="range"
-                min={DESK_ZOOM_MIN}
-                max={DESK_ZOOM_MAX}
-                step={0.05}
-                value={settings.deskZoom as number}
-                onChange={(e) => handleDeskZoom(parseFloat(e.target.value))}
-                className="scale-slider desk-zoom-slider"
-                aria-labelledby="desk-zoom-title"
-                aria-describedby="desk-zoom-description"
-              />
-              <span className="scale-value">
-                {(settings.deskZoom as number).toFixed(2)}&times;
-              </span>
-            </div>
-            <div className="desk-zoom-readout">
-              {actualCell !== null ? (
-                <>
-                  <span>
-                    Cell now <strong>{Math.round(actualCell)}px</strong>
-                  </span>
-                  {cappedByDesk && (
-                    // Said plainly, because otherwise the top of the slider
-                    // looks broken: it is still moving the ceiling, but the
-                    // desk is already fitting to the icons instead.
-                    <span className="desk-zoom-note">
-                      held down to fit your furthest icon &mdash; zooming in
-                      further won&rsquo;t enlarge it
-                    </span>
-                  )}
-                </>
-              ) : (
-                <span>
-                  Ceiling{" "}
-                  <strong>
-                    {Number.isFinite(zoomedCap)
-                      ? `${Math.round(zoomedCap)}px`
-                      : "unlimited"}
-                  </strong>{" "}
-                  per cell
-                </span>
-              )}
-            </div>
-            {(settings.deskZoom as number) !== 1 && (
-              <button
-                type="button"
-                className="btn desk-zoom-reset"
-                onClick={() => handleDeskZoom(1)}
-              >
-                Reset to 1.00&times;
-              </button>
-            )}
-          </div>
-        </div>
-      )}
+      {settings.gridLayout === "full-screen" && <DeskProfiles />}
       {settings.dialSize === "scale" && (
         <div className="setting-wrapper setting-group scale-limit-group">
           <div className="setting-label">

@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   BASE_PAGE,
-  DESK_ZOOM_MAX,
-  DESK_ZOOM_MIN,
   GAP_RATIO,
   canvasPixelSize,
   cellSizeThatFits,
@@ -311,81 +309,6 @@ describe("cell arithmetic", () => {
       cellSizeThatFits(4, 4, 400, 400),
       6,
     );
-  });
-});
-
-describe("desk zoom scales the ceiling, never the floor", () => {
-  const cap = (zoom: number) => maxCellSize("tiny", false, true, 1.6, zoom);
-
-  it("scales the dial-size ceiling proportionally", () => {
-    expect(cap(1)).toBeCloseTo(CAP, 6);
-    expect(cap(2)).toBeCloseTo(CAP * 2, 6);
-    expect(cap(0.5)).toBeCloseTo(CAP / 2, 6);
-  });
-
-  it("leaves an unlimited cap unlimited", () => {
-    // Nothing to scale, and multiplying Infinity would only invite NaN.
-    expect(maxCellSize("scale", false, false, 1.6, 2)).toBe(Infinity);
-  });
-
-  it("ignores a nonsensical zoom rather than collapsing the desk", () => {
-    expect(cap(0)).toBeCloseTo(CAP, 6);
-    expect(cap(-3)).toBeCloseTo(CAP, 6);
-    expect(cap(NaN)).toBeCloseTo(CAP, 6);
-  });
-
-  it("makes cells bigger on a roomy desk", () => {
-    const small = plan(2560, 1440, { active: { cols: 4, rows: 2 }, capCell: cap(1) });
-    const big = plan(2560, 1440, { active: { cols: 4, rows: 2 }, capCell: cap(2) });
-    expect(big.cell).toBeGreaterThan(small.cell);
-    // More room per cell means fewer of them fit.
-    expect(big.cols).toBeLessThan(small.cols);
-  });
-
-  it("brings more empty grid into view when zoomed out", () => {
-    const normal = plan(1920, 1080, { active: { cols: 4, rows: 2 }, capCell: cap(1) });
-    const out = plan(1920, 1080, { active: { cols: 4, rows: 2 }, capCell: cap(0.5) });
-    expect(out.cell).toBeLessThan(normal.cell);
-    expect(out.cols).toBeGreaterThan(normal.cols);
-    expect(out.rows).toBeGreaterThan(normal.rows);
-  });
-
-  it("is still only a ceiling: the active area wins when it has to", () => {
-    // A reach far larger than the window. Zooming in must not push it off
-    // screen — the fit calculation still has the last word.
-    const zoomedIn = plan(800, 600, { active: { cols: 30, rows: 20 }, capCell: cap(2.5) });
-    const fits = cellSizeThatFits(30, 20, 800 - PADDING, 600 - PADDING);
-    expect(zoomedIn.cell).toBeCloseTo(fits, 6);
-    expect(zoomedIn.cols).toBeGreaterThanOrEqual(30);
-    expect(zoomedIn.rows).toBeGreaterThanOrEqual(20);
-  });
-
-  it("never lets zoom introduce a lower bound", () => {
-    // Even zoomed all the way in, a tiny window still shows the whole reach.
-    const tiny = plan(320, 480, { active: { cols: 21, rows: 11 }, capCell: cap(DESK_ZOOM_MAX) });
-    const { width, height } = canvasPixelSize(21, 11, tiny.cell);
-    expect(width).toBeLessThanOrEqual(320 - PADDING + 0.001);
-    expect(height).toBeLessThanOrEqual(480 - PADDING + 0.001);
-  });
-
-  it("does not move a single icon", () => {
-    // Zoom changes the cell size, not the grid coordinates. Every icon keeps
-    // its (row, col), so the arrangement is untouched — I1.
-    const arrangement = [
-      { panel: "full-screen-panel", row: 0, col: 0 },
-      { panel: "full-screen-panel", row: 3, col: 7 },
-      { panel: "full-screen-panel", row: 9, col: 2 },
-    ];
-    const extent = contentExtent(arrangement);
-    const active = { cols: extent.maxCol + 1, rows: extent.maxRow + 1 };
-    for (const zoom of [DESK_ZOOM_MIN, 0.75, 1, 1.5, DESK_ZOOM_MAX]) {
-      const p = plan(1600, 900, { active, capCell: cap(zoom) });
-      expect(p.cols).toBeGreaterThanOrEqual(active.cols);
-      expect(p.rows).toBeGreaterThanOrEqual(active.rows);
-    }
-    // contentExtent is what feeds the active area, and it is a pure function of
-    // the coordinates — zoom is not one of its inputs.
-    expect(contentExtent(arrangement)).toEqual(extent);
   });
 });
 
