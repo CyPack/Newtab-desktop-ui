@@ -7,10 +7,46 @@ import { contrastRatio } from "random-color-library";
 import { getImageAverageColor } from "#lib/imageLuminance";
 import { settings } from "#stores/useSettings";
 import { bookmarks } from "#stores/useBookmarks";
+import { applyDemoLayout } from "#stores/useBookmarks/mockBookmarks/demoLayout";
 import { modals } from "#stores/useModals";
 import { Dial } from "./Dial";
 import { SettingsGear } from "./SettingsGear";
 import { BookmarkModal } from "../BookmarkModal";
+import {
+  BASE_FONT_SIZE,
+  GAP_RATIO,
+  type CanvasPlan,
+  canvasPixelSize,
+  contentExtent,
+  fitCount,
+  logicalCellSize,
+  maxCellSize,
+  normalizeFullScreenCoords,
+  referenceCellSize,
+  resolveCanvas,
+} from "./layout";
+import {
+  latestSnapshot,
+  pruneLegacyBackups,
+  quarantine,
+  recordSnapshot,
+} from "./positionStore";
+import {
+  type ProfileStore,
+  activeProfile,
+  addProfile,
+  createProfileObject,
+  deleteProfile,
+  duplicateProfile,
+  ensureStore,
+  getProfile,
+  project,
+  renameProfile,
+  setActiveProfile,
+  setCellSize,
+  syncActive,
+  writeStore as writeProfileStore,
+} from "./deskProfiles";
 
 type PanelName = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "bottom-full" | "full-screen-panel";
 
@@ -19,19 +55,178 @@ const dropZonePercent = 0.6;
 const ORGANIZED_LAYOUT_KEY = "organized-layout";
 const HAS_ORGANIZED_KEY = "has-organized";
 
+// ---------------------------------------------------------------------------
+// Desk profiles
+//
+// The profile layer lives entirely on the two functions below. There are 28
+// code paths that write the arrangement and none of them know profiles exist —
+// they all funnel through savePanelBookmarks and loadPanelBookmarks, which is
+// the same seam the snapshot store hangs off and for the same reason: a rule
+// enforced in one place cannot be forgotten by the twenty-ninth caller.
+// ---------------------------------------------------------------------------
+
+let profileStore: ProfileStore | null = null;
+
+/** The ceiling a first-run profile inherits: exactly what the desk is using
+ *  now, so the upgrade is invisible. */
+function currentCeiling(): number {
+  const cap = maxCellSize(
+    settings.dialSize as string,
+    settings.squareDials as boolean,
+    settings.limitDialScale as boolean,
+    settings.maxDialScale as number,
+  );
+  // "Scale to fit" with no limit reports Infinity, which is not a size anyone
+  // can be handed. Fall back to the reference cell the page maths already uses.
+  return Number.isFinite(cap)
+    ? cap
+    : referenceCellSize(cap, settings.squareDials as boolean);
+}
+
+/** The arrangement as it sits on disk, for seeding the migration.
+ *
+ *  Read here rather than taken from the caller because the first thing to reach
+ *  for the profile store is not necessarily the load path: the component asks
+ *  for the active cell size during its first render, which is BEFORE the effect
+ *  that loads the desk. Seeded from the caller alone, that ordering produced a
+ *  first profile with no icons in it — the migration ran against a React state
+ *  that had not been filled yet. Disk does not have that problem. */
+function storedArrangement(): any[] {
+  try {
+    const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Lazily materialised, and safe to reach for at any point in start-up. */
+function profiles(seed?: any[]): ProfileStore {
+  if (!profileStore) {
+    const arrangement =
+      Array.isArray(seed) && seed.length > 0 ? seed : storedArrangement();
+    profileStore = ensureStore(localStorage, {
+      defaultCellSize: currentCeiling(),
+      arrangement,
+      screenHint: { width: window.innerWidth, height: window.innerHeight },
+    }).store;
+  }
+  return profileStore;
+}
+
+function persistProfiles(next: ProfileStore) {
+  profileStore = next;
+  // Best effort, exactly like the snapshot ring: a profile that could not be
+  // written is an inconvenience, a save it took down with it would be a bug.
+  writeProfileStore(localStorage, next);
+}
+
+export function activeDeskCellSize(): number {
+  return activeProfile(profiles()).cellSize;
+}
+
+export function readDeskProfiles(): ProfileStore {
+  return profiles();
+}
+
+/**
+ * Lays every icon out in a compact block from the origin, at a given cell size.
+ *
+ * A new profile needs SOME arrangement — the bookmarks exist and have to be
+ * somewhere — but inheriting the outgoing profile's one defeats the purpose:
+ * that arrangement typically spans the whole screen, which pins the cell size
+ * to whatever fits it and leaves the new profile's size control inert. A block
+ * at the origin reaches only as far as it needs to, so the size the user just
+ * chose is the size they get.
+ *
+ * This is also what the Tidy button runs. It is deliberately an explicit action
+ * rather than something that happens whenever the size changes: re-flowing
+ * icons behind the user's back is exactly the reflow this whole architecture
+ * exists to abolish.
+ */
+export function compactBlock(
+  list: any[],
+  cellSize: number,
+  container: HTMLElement | null,
+): any[] {
+  const { availableWidth } = measureGridArea(container);
+  const cols = Math.max(1, fitCount(Math.max(1, availableWidth), Math.max(1, cellSize)));
+  let placed = 0;
+  return list.map((bm) => {
+    if (!bm || bm.panel !== "full-screen-panel") return bm;
+    const index = placed++;
+    return { ...bm, row: Math.floor(index / cols), col: index % cols };
+  });
+}
+
+/**
+ * Switches profiles and returns the arrangement the caller should render.
+ *
+ * The order is load-bearing. The current desk has to be captured into the
+ * OUTGOING profile before activity moves, or the incoming profile's positions
+ * are written over the one being left behind — the switch would quietly
+ * flatten every profile into the last one used.
+ */
+export function switchDeskProfile(id: string, current: any[]): any[] | null {
+  const store = profiles(current);
+  if (store.activeId === id || !getProfile(store, id)) return null;
+
+  // A profile switch replaces the whole arrangement, so it earns a snapshot of
+  // its own — the throttle would otherwise swallow it in a busy session.
+  recordSnapshot(localStorage, current, { reason: "profile-switch", force: true });
+
+  const captured = syncActive(store, current);
+  const switched = setActiveProfile(captured, id);
+  persistProfiles(switched);
+
+  return normalizeFullScreenCoords(project(switched, current));
+}
+
+/** Applies a profile-store mutation and, when it changes the active profile's
+ *  size, reports that the desk needs replanning. */
+export function updateDeskProfiles(next: ProfileStore): ProfileStore {
+  persistProfiles(next);
+  return next;
+}
+
+function measureGridArea(el: HTMLElement | null) {
+  const fallbackPadding = 20;
+  if (!el) {
+    return {
+      availableWidth: window.innerWidth - fallbackPadding * 2,
+      availableHeight: window.innerHeight - fallbackPadding * 2,
+    };
+  }
+  const cs = getComputedStyle(el);
+  const pad = (value: string) => parseFloat(value) || fallbackPadding;
+  return {
+    availableWidth: el.clientWidth - pad(cs.paddingLeft) - pad(cs.paddingRight),
+    availableHeight: el.clientHeight - pad(cs.paddingTop) - pad(cs.paddingBottom),
+  };
+}
+
 function savePanelBookmarks(panelBookmarks: any[]): boolean {
   try {
     const dataToSave = JSON.stringify(panelBookmarks);
     localStorage.setItem(PANEL_BOOKMARKS_KEY, dataToSave);
-    
-    console.log('Panel bookmarks saved:', panelBookmarks.length, 'items');
-    
+
     // Verify save worked
     const saved = localStorage.getItem(PANEL_BOOKMARKS_KEY);
     if (!saved || saved !== dataToSave) {
       console.error('Save verification failed!');
       return false;
     }
+
+    // Snapshot rides on the save rather than on any one caller, so no future
+    // write path can forget it. It is deliberately after the verification: a
+    // save that did not land must not be remembered as one that did. The store
+    // throttles itself, so a burst of drags costs one snapshot, not dozens.
+    recordSnapshot(localStorage, panelBookmarks, { reason: "layout-change" });
+
+    // Record the arrangement into whichever profile is active. Same reasoning
+    // as the snapshot above: attached to the save, not to any one caller.
+    persistProfiles(syncActive(profiles(panelBookmarks), panelBookmarks));
     return true;
   } catch (e) {
     console.error('Failed to save panel bookmarks:', e);
@@ -53,8 +248,17 @@ function loadPanelBookmarks(): any[] {
     const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      console.log('Loaded panel bookmarks:', parsed.length, 'items');
-      return Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) return [];
+      // The stored arrangement seeds the profile store on first run, then the
+      // active profile's positions are laid over it. On a single-profile setup
+      // the two are identical and this is a no-op; with several profiles it is
+      // the only thing that makes switching visible.
+      const projected = project(profiles(parsed), parsed);
+      // Re-based to the origin on the way in. Empty rows and columns the
+      // arrangement had drifted away from are released here: that is what makes
+      // area claimed in an earlier session go inactive again, and what keeps
+      // the active area equal to the icons' bounding box.
+      return normalizeFullScreenCoords(projected);
     }
     
     // Backup storage attempt
@@ -68,15 +272,69 @@ function loadPanelBookmarks(): any[] {
     return [];
   } catch (e) {
     console.error('Failed to load panel bookmarks:', e);
-    
-    // Try to recover corrupted data
+
+    // The arrangement is unreadable. It used to be deleted here, which turned a
+    // parse error into permanent data loss with no way back. Move it aside
+    // instead, then fall back to the newest snapshot: the user gets their desk
+    // as it was minutes ago rather than an empty one.
     try {
+      const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
+      if (raw) quarantine(localStorage, raw);
       localStorage.removeItem(PANEL_BOOKMARKS_KEY);
-      console.warn('Removed corrupted data from localStorage');
+      console.warn('Quarantined unreadable panel bookmarks');
     } catch {}
-    
+
+    try {
+      const snapshot = latestSnapshot(localStorage);
+      if (snapshot && Array.isArray(snapshot.data) && snapshot.data.length > 0) {
+        const recovered = normalizeFullScreenCoords(snapshot.data as any[]);
+        // Write it back before returning. This function is called from more
+        // than one place during start-up, and the quarantine above left the key
+        // empty — without this the second caller sees no arrangement at all and
+        // rebuilds the desk from scratch, quietly undoing the recovery.
+        try {
+          localStorage.setItem(PANEL_BOOKMARKS_KEY, JSON.stringify(recovered));
+        } catch {}
+        console.warn(
+          'Recovered', recovered.length,
+          'bookmarks from the snapshot taken at', new Date(snapshot.at).toISOString(),
+        );
+        return recovered;
+      }
+    } catch (recoveryError) {
+      console.error('Snapshot recovery failed:', recoveryError);
+    }
+
     return [];
   }
+}
+
+// Coordinate helpers for (row, col) grid positioning
+function coordToKey(row: number, col: number): string {
+  return `${row},${col}`;
+}
+
+function migrateIndexToRowCol(bookmarksList: any[], cols: number): any[] {
+  const safeCols = cols > 0 ? cols : 10;
+  let nextFallbackIndex = 0;
+  // Find the highest existing index to start fallback from
+  bookmarksList.forEach(bm => {
+    if (bm.panel === "full-screen-panel" && typeof bm.index === "number") {
+      nextFallbackIndex = Math.max(nextFallbackIndex, bm.index + 1);
+    }
+  });
+
+  return bookmarksList.map(bm => {
+    if (bm.panel === "full-screen-panel" && bm.row === undefined && bm.col === undefined) {
+      const idx = typeof bm.index === "number" ? bm.index : nextFallbackIndex++;
+      return {
+        ...bm,
+        row: Math.max(0, Math.floor(idx / safeCols)),
+        col: Math.max(0, idx % safeCols),
+      };
+    }
+    return bm;
+  });
 }
 
 let saveTimeout: NodeJS.Timeout | null = null;
@@ -113,13 +371,6 @@ function normalizeUrl(url: string): string {
   }
 }
 
-function isInDragZone(x: number, width: number) {
-  const zoneWidth = width * dropZonePercent;
-  const start = (width - zoneWidth) / 2;
-  const end = start + zoneWidth;
-  return x >= start && x <= end;
-}
-
 interface ExtendedDragEvent extends React.DragEvent {
   originalEvent?: DragEvent;
 }
@@ -131,6 +382,8 @@ export const Grid = observer(function Grid() {
   const bottomLeftGridRef = useRef<HTMLDivElement>(null);
   const bottomRightGridRef = useRef<HTMLDivElement>(null);
   const bottomFullGridRef = useRef<HTMLDivElement>(null);
+  // The transformed desk itself; pointer maths is done against its box.
+  const fullScreenGridRef = useRef<HTMLDivElement>(null);
   const breadcrumbsRef = useRef<HTMLDivElement>(null);
 
   // State
@@ -158,37 +411,70 @@ export const Grid = observer(function Grid() {
          : settings.gridLayout === "3-panel" ? 3 
          : 4;
   });
-  const [gridDimensions, setGridDimensions] = useState({ cols: 10, rows: 6 });
-  const [targetSlotIndex, setTargetSlotIndex] = useState<number | null>(null);
+  // The desk plan: how many cells to render, where the content block sits
+  // inside them, and how much to zoom. Recomputed on resize; the content block
+  // itself never moves relative to itself, whatever this comes out as.
+  // The active profile's cell size, mirrored into React so the desk replans
+  // when it changes. The profile store itself lives at module scope because the
+  // storage seam has to reach it from outside any component.
+  const [deskCellSize, setDeskCellSize] = useState<number>(() => activeDeskCellSize());
+  const [plan, setPlan] = useState<CanvasPlan>(() => ({
+    cols: 10,
+    rows: 6,
+    cell: 80,
+    scale: 1,
+    atCapSize: false,
+  }));
+
+  // Where the icon being dragged would land, and what dropping there would do.
+  // Drives the live indicator, so the outcome is visible before letting go.
+  const [dropTarget, setDropTarget] = useState<{
+    row: number;
+    col: number;
+    intent: "move" | "swap" | "folder";
+  } | null>(null);
+  // The active area — the icons' bounding box — is what the desk is scaled to
+  // fit. It is a HIGH-WATER MARK for the life of this page: placing an icon out
+  // in the empty grid expands it immediately, but tidying icons back inward
+  // does not contract it, so the desk doesn't jump larger mid-edit. A fresh
+  // load measures the icons again, and space nothing reaches goes inactive.
+  const activeAreaRef = useRef({ cols: 0, rows: 0 });
+
+  const canvas = useMemo(
+    () => ({ cols: plan.cols, rows: plan.rows }),
+    [plan.cols, plan.rows],
+  );
+  // Read inside recalculatePlan without making it depend on the plan itself.
+  const planRef = useRef(plan);
+  planRef.current = plan;
+  const [targetSlotIndex, setTargetSlotIndex] = useState<{ row: number; col: number } | null>(null);
 
   // Refs for drag state
   const targetPanelRef = useRef<string | null>(null);
-  const draggedRef = useRef<{ id: string; panel: string; index: number } | null>(null);
+  const draggedRef = useRef<{ id: string; panel: string; index: number; row?: number; col?: number } | null>(null);
   const dragImageRef = useRef<HTMLElement | null>(null);
 
   const isRootSafe = useMemo(() => {
-    const hasValidFolder = bookmarks.currentFolder?.id;
     const hasDefaultFolder = settings.defaultFolder !== undefined;
-    const isDefaultFolder = hasDefaultFolder && bookmarks.currentFolder.id === settings.defaultFolder;
-    const hasNoParent = !bookmarks.parentId;
-    
-    const result = isDefaultFolder || hasNoParent;
-    
-    console.log('isRoot calculation:', {
-      hasValidFolder,
-      hasDefaultFolder, 
-      isDefaultFolder,
-      hasNoParent,
-      result
-    });
+    const isDefaultFolder =
+      hasDefaultFolder && bookmarks.currentFolder.id === settings.defaultFolder;
+    const result = isDefaultFolder || !bookmarks.parentId;
     
     return result;
   }, [bookmarks.currentFolder?.id, settings.defaultFolder, bookmarks.parentId]);
 
   const updatePanelBookmarksWithSave = useCallback((updater: (current: any[]) => any[]) => {
     setPanelBookmarks((current) => {
-      const next = updater(current);
-      
+      // Only a safety net here: re-basing on every edit would yank the whole
+      // arrangement up the moment the topmost icon was moved down. Releasing
+      // unused space is a load-time job (see loadPanelBookmarks).
+      const updated = updater(current);
+      const bounds = contentExtent(updated);
+      const next =
+        bounds.count > 0 && (bounds.minRow < 0 || bounds.minCol < 0)
+          ? normalizeFullScreenCoords(updated)
+          : updated;
+
       // Save only if we're in root and data actually changed
       if (isRootSafe && JSON.stringify(current) !== JSON.stringify(next)) {
         debouncedSavePanelBookmarks(next);
@@ -213,67 +499,107 @@ export const Grid = observer(function Grid() {
     return panelItems.length === 0 ? 0 : Math.max(...panelItems.map(bm => bm.index ?? 0)) + 1;
   }, [panelBookmarks]);
 
-  const findEmptySlot = useCallback((bookmarks: any[], totalSlots: number): number => {
-    const occupiedSlots = new Set(
-      bookmarks
-        .filter((b) => b.panel === "full-screen-panel")
-        .map((b) => b.index)
-        .filter((index) => index !== undefined && index !== null)
+  const findEmptySlot = useCallback((bms: any[], cols: number, rows: number): { row: number; col: number } => {
+    const occupied = new Set<string>(
+      bms
+        .filter(b => b.panel === "full-screen-panel" && b.row !== undefined && b.col !== undefined)
+        .map(b => coordToKey(b.row, b.col))
     );
-    
-    for (let i = 0; i < totalSlots; i++) {
-      if (!occupiedSlots.has(i)) {
-        return i;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (!occupied.has(coordToKey(r, c))) return { row: r, col: c };
       }
     }
-    
-    return totalSlots - 1;
+    return { row: rows, col: 0 };
   }, []);
 
-  const getNextAvailableIndexes = useCallback((existingBookmarks: any[], totalSlots: number, count: number): number[] => {
-    const occupiedSlots = new Set(
+  const getNextAvailableCoords = useCallback((existingBookmarks: any[], cols: number, rows: number, count: number): { row: number; col: number }[] => {
+    const occupied = new Set<string>(
       existingBookmarks
-        .filter((b) => b.panel === "full-screen-panel")
-        .map((b) => b.index)
-        .filter((index) => index !== undefined && index !== null)
+        .filter(b => b.panel === "full-screen-panel" && b.row !== undefined && b.col !== undefined)
+        .map(b => coordToKey(b.row, b.col))
     );
-    
-    const availableIndexes: number[] = [];
-    for (let i = 0; i < totalSlots && availableIndexes.length < count; i++) {
-      if (!occupiedSlots.has(i)) {
-        availableIndexes.push(i);
+    const available: { row: number; col: number }[] = [];
+    for (let r = 0; r < rows && available.length < count; r++) {
+      for (let c = 0; c < cols && available.length < count; c++) {
+        if (!occupied.has(coordToKey(r, c))) available.push({ row: r, col: c });
       }
     }
-    
-    return availableIndexes;
+    let extraRow = rows;
+    while (available.length < count) {
+      for (let c = 0; c < cols && available.length < count; c++) {
+        available.push({ row: extraRow, col: c });
+      }
+      extraRow++;
+    }
+    return available;
   }, []);
 
-  // Calculate grid dimensions
-  const calculateGridDimensions = useCallback(() => {
+  // Work out the desk for the current window. The content block is rigid; what
+  // this decides is how much empty desk surrounds it and how much to zoom.
+  // Above the base screen that means whole extra pages; below it, empty margin
+  // is cropped away before any icon shrinks. See Grid/layout.ts.
+  const recalculatePlan = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
-    
-    const screenWidth = window.innerWidth;
-    const screenHeight = window.innerHeight;
-    const padding = 40;
-    const gap = 8;
-    
-    let dialSize = 60;
-    if (settings.dialSize === "small") dialSize = 50;
-    else if (settings.dialSize === "medium") dialSize = 60;
-    else if (settings.dialSize === "large") dialSize = 80;
-    else if (settings.dialSize === "extra-large") dialSize = 100;
-    
-    const availableWidth = screenWidth - padding;
-    const availableHeight = screenHeight - padding - 120;
-    
-    const cols = Math.floor((availableWidth + gap) / (dialSize + gap));
-    const rows = Math.floor((availableHeight + gap) / (dialSize + gap));
-    
-    setGridDimensions({ 
-      cols: Math.max(cols, 5),
-      rows: Math.max(rows, 4)
-    });
-  }, [settings.dialSize, settings.gridLayout]);
+
+    const { availableWidth, availableHeight } = measureGridArea(
+      bottomFullGridRef.current,
+    );
+    if (availableWidth <= 0 || availableHeight <= 0) return;
+
+    const extent = contentExtent(panelBookmarks);
+    if (extent.count > 0) {
+      activeAreaRef.current = {
+        cols: Math.max(activeAreaRef.current.cols, extent.maxCol + 1),
+        rows: Math.max(activeAreaRef.current.rows, extent.maxRow + 1),
+      };
+    }
+
+    const options = {
+      // Bounding box of the icons: the only thing they influence, and only by
+      // way of the zoom. Their cells are never shifted.
+      active: activeAreaRef.current,
+      availableWidth,
+      availableHeight,
+      logicalCell: logicalCellSize(settings.squareDials as boolean),
+      // The ceiling is the active profile's, not a global setting. That is the
+      // whole point of profiles: it stays put while icons are arranged, so the
+      // grid the user is placing into cannot resize underneath them.
+      capCell: deskCellSize,
+      base: {
+        width: settings.basePageWidth as number,
+        height: settings.basePageHeight as number,
+      },
+      fixed:
+        settings.gridCols > 0 && settings.gridRows > 0
+          ? { cols: settings.gridCols as number, rows: settings.gridRows as number }
+          : null,
+      squareDials: settings.squareDials as boolean,
+    };
+
+    const next = resolveCanvas(options);
+
+    // Ignore imperceptible churn so a ResizeObserver storm can't loop.
+    setPlan((prev) =>
+      prev.cols === next.cols &&
+      prev.rows === next.rows &&
+      Math.abs(prev.scale - next.scale) < 0.0005
+        ? prev
+        : next,
+    );
+  }, [
+    panelBookmarks,
+    settings.basePageHeight,
+    settings.basePageWidth,
+    deskCellSize,
+    settings.dialSize,
+    settings.gridCols,
+    settings.gridLayout,
+    settings.gridRows,
+    settings.limitDialScale,
+    settings.maxDialScale,
+    settings.squareDials,
+  ]);
 
   // Organize bookmarks for layout
   const organizeBookmarksForLayout = useCallback(
@@ -285,24 +611,35 @@ export const Grid = observer(function Grid() {
       let migrated: any[] = [];
       
       if (targetLayout === "full-screen") {
-        const totalSlots = gridDimensions.cols * gridDimensions.rows;
-        
-        migrated = bookmarkList.map((bm, globalIndex) => ({
-          ...bm,
-          panel: "full-screen-panel",
-          index: bm.panel === "full-screen-panel" && bm.index !== undefined ? bm.index : globalIndex
-        }));
+        const { cols, rows } = canvas;
 
-        const indexMap = new Map();
-        migrated.forEach(bm => {
-          if (indexMap.has(bm.index)) {
-            let newIndex = 0;
-            while (indexMap.has(newIndex) && newIndex < totalSlots) {
-              newIndex++;
-            }
-            bm.index = newIndex;
+        migrated = bookmarkList.map((bm, globalIndex) => {
+          if (bm.panel === "full-screen-panel" && bm.row !== undefined && bm.col !== undefined) {
+            return { ...bm, panel: "full-screen-panel" };
           }
-          indexMap.set(bm.index, bm.id);
+          const idx = (bm.panel === "full-screen-panel" && bm.index !== undefined) ? bm.index : globalIndex;
+          return {
+            ...bm,
+            panel: "full-screen-panel",
+            row: Math.floor(idx / cols),
+            col: idx % cols,
+          };
+        });
+
+        // Deduplicate: resolve coordinate conflicts
+        const coordMap = new Map<string, string>(); // "row,col" -> bookmark id
+        migrated.forEach(bm => {
+          if (bm.panel !== "full-screen-panel") return;
+          const key = coordToKey(bm.row, bm.col);
+          if (coordMap.has(key)) {
+            // Build occupied set from coordMap (all previously assigned positions)
+            const occupiedBookmarks = migrated
+              .filter(m => m.panel === "full-screen-panel" && coordMap.has(coordToKey(m.row, m.col)));
+            const empty = findEmptySlot(occupiedBookmarks, cols, rows);
+            bm.row = empty.row;
+            bm.col = empty.col;
+          }
+          coordMap.set(coordToKey(bm.row, bm.col), bm.id);
         });
       } else {
         const panelOrder: PanelName[] = 
@@ -367,14 +704,15 @@ export const Grid = observer(function Grid() {
       
       if (browserBookmarks.length > 0) {
         if (targetLayout === "full-screen") {
-          const totalSlots = gridDimensions.cols * gridDimensions.rows;
-          const availableIndexes = getNextAvailableIndexes(migrated, totalSlots, browserBookmarks.length);
-          
-          distributed = browserBookmarks.slice(0, availableIndexes.length).map((bm: any, i: number) => ({
+          const { cols, rows } = canvas;
+          const availableCoords = getNextAvailableCoords(migrated, cols, rows, browserBookmarks.length);
+
+          distributed = browserBookmarks.slice(0, availableCoords.length).map((bm: any, i: number) => ({
             ...bm,
             panel: "full-screen-panel",
             isPanelBookmark: true,
-            index: availableIndexes[i],
+            row: availableCoords[i].row,
+            col: availableCoords[i].col,
             name: bm.title || bm.name,
             title: bm.title || bm.name,
           }));
@@ -408,15 +746,51 @@ export const Grid = observer(function Grid() {
 
       return [...migrated, ...distributed];
     },
-    [gridDimensions, bookmarks, lastOrganizedLayout, hasOrganizedForLayout, getNextAvailableIndexes]
+    [canvas, bookmarks, lastOrganizedLayout, hasOrganizedForLayout, getNextAvailableCoords, findEmptySlot]
   );
 
   // Effects
   useEffect(() => {
-    calculateGridDimensions();
-    window.addEventListener("resize", calculateGridDimensions);
-    return () => window.removeEventListener("resize", calculateGridDimensions);
-  }, [calculateGridDimensions]);
+    recalculatePlan();
+
+    const gridEl = bottomFullGridRef.current;
+    if (gridEl && typeof ResizeObserver !== 'undefined') {
+      let rafId: number;
+      const observer = new ResizeObserver(() => {
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => recalculatePlan());
+      });
+      observer.observe(gridEl);
+      return () => {
+        cancelAnimationFrame(rafId);
+        observer.disconnect();
+      };
+    }
+
+    // Fallback for pre-render or no ResizeObserver
+    window.addEventListener("resize", recalculatePlan);
+    return () => window.removeEventListener("resize", recalculatePlan);
+  }, [recalculatePlan]);
+
+  // Safety net for an explicit canvas: if a bookmark ends up outside it (legacy
+  // data, a smaller canvas restored from a backup, a manual settings change),
+  // GROW the canvas rather than moving the icon. Positions are the thing we
+  // promise to preserve. In automatic mode the desk sizes itself, so there is
+  // nothing to grow.
+  useEffect(() => {
+    if (settings.gridLayout !== "full-screen") return;
+    if (settings.gridCols <= 0 || settings.gridRows <= 0) return;
+
+    const extent = contentExtent(panelBookmarks);
+    if (extent.count === 0) return;
+    const cols = Math.max(settings.gridCols as number, extent.maxCol + 1);
+    let rows = Math.max(settings.gridRows as number, extent.maxRow + 1);
+    while (cols * rows < extent.count) rows += 1;
+
+    if (cols !== settings.gridCols || rows !== settings.gridRows) {
+      settings.handleGridCanvas(cols, rows);
+    }
+  }, [settings.gridLayout, settings.gridCols, settings.gridRows, panelBookmarks]);
 
   useEffect(() => {
     if (panelBookmarks.length === 0) {
@@ -451,7 +825,6 @@ export const Grid = observer(function Grid() {
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === PANEL_BOOKMARKS_KEY && e.newValue !== e.oldValue) {
-        console.log('Panel bookmarks changed in another tab');
         if (e.newValue) {
           try {
             const newBookmarks = JSON.parse(e.newValue);
@@ -467,26 +840,42 @@ export const Grid = observer(function Grid() {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Periodic backup
+  // Retire the dated backup keys the old build wrote. They were never read by
+  // anything and never pruned, so on a long-lived profile they were pure
+  // ballast; the newest one is folded into the history on the way out.
   useEffect(() => {
-    const backupInterval = setInterval(() => {
-      if (isRootSafe && panelBookmarks.length > 0) {
-        try {
-          const backup = {
-            timestamp: Date.now(),
-            data: panelBookmarks
-          };
-          localStorage.setItem(PANEL_BOOKMARKS_KEY + '_backup_' + new Date().toISOString().split('T')[0], 
-                             JSON.stringify(backup));
-          console.log('Daily backup created');
-        } catch (e) {
-          console.error('Backup creation failed:', e);
-        }
-      }
-    }, 24 * 60 * 60 * 1000); // 24 saat
+    const { removed, adopted } = pruneLegacyBackups(localStorage);
+    if (removed.length > 0) {
+      console.log(
+        `Retired ${removed.length} legacy backup key(s)` +
+        (adopted > 0 ? `, adopting ${adopted} bookmarks into the history` : ''),
+      );
+    }
+  }, []);
 
-    return () => clearInterval(backupInterval);
+  // A snapshot on the way out.
+  //
+  // This replaces a 24-hour setInterval that could not fire: its effect
+  // depended on panelBookmarks, so every single drag restarted the clock. A
+  // new-tab page is closed in seconds, not days — the moment that actually
+  // matters is the page going away, which is what visibilitychange catches
+  // (pagehide covers the browsers that skip it on teardown).
+  const snapshotOnExit = useCallback(() => {
+    if (!isRootSafe || panelBookmarks.length === 0) return;
+    recordSnapshot(localStorage, panelBookmarks, { reason: "page-hidden", force: true });
   }, [isRootSafe, panelBookmarks]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") snapshotOnExit();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", snapshotOnExit);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", snapshotOnExit);
+    };
+  }, [snapshotOnExit]);
 
   // Global API for panel bookmark management
   useEffect(() => {
@@ -506,8 +895,8 @@ export const Grid = observer(function Grid() {
         setActivePanel(b.panel);
         targetPanelRef.current = b.panel;
         
-        if (b.panel === "full-screen-panel" && b.index !== undefined) {
-          setTargetSlotIndex(b.index);
+        if (b.panel === "full-screen-panel" && b.row !== undefined && b.col !== undefined) {
+          setTargetSlotIndex({ row: b.row, col: b.col });
         }
         
         modals.editingBookmarkId = id;
@@ -553,10 +942,98 @@ export const Grid = observer(function Grid() {
       },
       getNextIndexForPanel: getNextIndexForPanel,
       getCurrentTargetSlot: () => targetSlotIndex,
-      setCurrentTargetSlot: (slotIndex: number) => setTargetSlotIndex(slotIndex),
+      setCurrentTargetSlot: (slot: { row: number; col: number }) => setTargetSlotIndex(slot),
       clearCurrentTargetSlot: () => setTargetSlotIndex(null),
       
       // Export panel bookmarks for backup
+      // Desk profiles.
+      //
+      // Every mutation goes through the module-level store, is persisted, and
+      // then re-reads the active cell size into React. Going the other way —
+      // keeping the store in component state — would put it out of reach of
+      // savePanelBookmarks, which is called from module scope.
+      deskProfiles: {
+        read: () => readDeskProfiles(),
+
+        // The high-water mark exists so that tidying icons inward MID-EDIT does
+        // not make the whole desk jump larger. A profile boundary is not an
+        // edit — it is a different desk — so carrying the previous profile's
+        // reach across it would pin the new one to a size it never asked for.
+        _resetReach: () => {
+          activeAreaRef.current = { cols: 0, rows: 0 };
+        },
+
+        switch: (id: string) => {
+          activeAreaRef.current = { cols: 0, rows: 0 };
+          const next = switchDeskProfile(id, panelBookmarks);
+          if (next) {
+            setPanelBookmarks(next);
+            if (isRootSafe) savePanelBookmarks(next);
+          }
+          setDeskCellSize(activeDeskCellSize());
+        },
+
+        create: (name: string, cellSize: number) => {
+          const profile = createProfileObject({
+            name,
+            cellSize,
+            screenHint: { width: window.innerWidth, height: window.innerHeight },
+          });
+          updateDeskProfiles(addProfile(readDeskProfiles(), profile));
+          activeAreaRef.current = { cols: 0, rows: 0 };
+          // Start from a compact block rather than the outgoing arrangement.
+          // Inheriting it would hand the new profile a desk that already spans
+          // the screen, which pins the cell size and leaves the size control
+          // with nothing to do — the opposite of what a fresh profile is for.
+          const fresh = normalizeFullScreenCoords(
+            compactBlock(panelBookmarks, cellSize, bottomFullGridRef.current),
+          );
+          setPanelBookmarks(fresh);
+          if (isRootSafe) savePanelBookmarks(fresh);
+          setDeskCellSize(activeDeskCellSize());
+          return profile.id;
+        },
+
+        tidy: () => {
+          activeAreaRef.current = { cols: 0, rows: 0 };
+          const fresh = normalizeFullScreenCoords(
+            compactBlock(panelBookmarks, activeDeskCellSize(), bottomFullGridRef.current),
+          );
+          setPanelBookmarks(fresh);
+          if (isRootSafe) savePanelBookmarks(fresh);
+          setDeskCellSize(activeDeskCellSize());
+        },
+
+        rename: (id: string, name: string) => {
+          updateDeskProfiles(renameProfile(readDeskProfiles(), id, name));
+        },
+
+        duplicate: (id: string, name?: string) => {
+          updateDeskProfiles(duplicateProfile(readDeskProfiles(), id, name));
+          setDeskCellSize(activeDeskCellSize());
+        },
+
+        remove: (id: string) => {
+          const before = readDeskProfiles();
+          const after = deleteProfile(before, id);
+          if (after === before) return false;
+          updateDeskProfiles(after);
+          if (before.activeId === id) {
+            activeAreaRef.current = { cols: 0, rows: 0 };
+            const projected = normalizeFullScreenCoords(project(after, panelBookmarks));
+            setPanelBookmarks(projected);
+            if (isRootSafe) savePanelBookmarks(projected);
+          }
+          setDeskCellSize(activeDeskCellSize());
+          return true;
+        },
+
+        setCellSize: (id: string, px: number) => {
+          updateDeskProfiles(setCellSize(readDeskProfiles(), id, px));
+          setDeskCellSize(activeDeskCellSize());
+        },
+      },
+
       exportPanelBookmarks: () => {
         return JSON.parse(JSON.stringify(panelBookmarks)); // Deep copy
       },
@@ -581,32 +1058,33 @@ export const Grid = observer(function Grid() {
             title: data.title,
             parentId: bookmarksBarId,
           });
-          
-          let nextIndex: number;
-          if (data.panel === "full-screen-panel") {
-            if (targetSlotIndex !== null) {
-              nextIndex = targetSlotIndex;
-              setTargetSlotIndex(null);
-            } else {
-              nextIndex = findEmptySlot(panelBookmarks, gridDimensions.cols * gridDimensions.rows);
-            }
-          } else {
-            nextIndex = getNextIndexForPanel(data.panel);
-          }
-          
-          const panelBookmarkEntry = {
+
+          const panelBookmarkEntry: any = {
             name: data.title,
             title: data.title,
             type: "bookmark" as const,
-            index: nextIndex,
             url: normalizedUrl,
             panel: data.panel,
             id: newBookmark.id,
             isPanelBookmark: true,
           };
-          
+
+          if (data.panel === "full-screen-panel") {
+            let coord: { row: number; col: number };
+            if (targetSlotIndex !== null) {
+              coord = targetSlotIndex;
+              setTargetSlotIndex(null);
+            } else {
+              coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
+            }
+            panelBookmarkEntry.row = coord.row;
+            panelBookmarkEntry.col = coord.col;
+          } else {
+            panelBookmarkEntry.index = getNextIndexForPanel(data.panel);
+          }
+
           updatePanelBookmarksWithSave((current) => [...current, panelBookmarkEntry]);
-          
+
           return newBookmark;
         } catch (error) {
           throw error;
@@ -620,31 +1098,32 @@ export const Grid = observer(function Grid() {
             title: data.title,
             parentId: bookmarksBarId,
           });
-          
-          let nextIndex: number;
-          if (data.panel === "full-screen-panel") {
-            if (targetSlotIndex !== null) {
-              nextIndex = targetSlotIndex;
-              setTargetSlotIndex(null);
-            } else {
-              nextIndex = findEmptySlot(panelBookmarks, gridDimensions.cols * gridDimensions.rows);
-            }
-          } else {
-            nextIndex = getNextIndexForPanel(data.panel);
-          }
-          
-          const panelFolderEntry = {
+
+          const panelFolderEntry: any = {
             name: data.title,
             title: data.title,
             type: "folder" as const,
-            index: nextIndex,
             panel: data.panel,
             id: newFolder.id,
             isPanelBookmark: true,
           };
-          
+
+          if (data.panel === "full-screen-panel") {
+            let coord: { row: number; col: number };
+            if (targetSlotIndex !== null) {
+              coord = targetSlotIndex;
+              setTargetSlotIndex(null);
+            } else {
+              coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
+            }
+            panelFolderEntry.row = coord.row;
+            panelFolderEntry.col = coord.col;
+          } else {
+            panelFolderEntry.index = getNextIndexForPanel(data.panel);
+          }
+
           updatePanelBookmarksWithSave((current) => [...current, panelFolderEntry]);
-          
+
           return newFolder;
         } catch (error) {
           throw error;
@@ -654,7 +1133,7 @@ export const Grid = observer(function Grid() {
     return () => {
       delete (window as any).panelBookmarkManager;
     };
-  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, gridDimensions, targetSlotIndex, updatePanelBookmarksWithSave, isRootSafe]);
+  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, canvas, targetSlotIndex, updatePanelBookmarksWithSave, isRootSafe]);
 
   // Main bookmark sync
   useEffect(() => {
@@ -677,27 +1156,57 @@ export const Grid = observer(function Grid() {
         setPanelBookmarks(folderBookmarksWithPanels);
         return;
       } else if (isRootSafe) {
-        const savedPanelBookmarks = loadPanelBookmarks();
-        
+        let savedPanelBookmarks = loadPanelBookmarks();
+
+        // Migrate legacy flat-index to (row, col) for full-screen bookmarks
+        const hasFsLegacy = savedPanelBookmarks.some(
+          bm => bm.panel === "full-screen-panel" && bm.row === undefined && bm.col === undefined
+        );
+        if (hasFsLegacy) {
+          // Use original column count from backup restore if available,
+          // otherwise fall back to current viewport calculation
+          const storedCols = parseInt(localStorage.getItem('migration-grid-cols') || '0');
+          const migrationCols = storedCols > 0 ? storedCols : canvas.cols;
+          savedPanelBookmarks = migrateIndexToRowCol(savedPanelBookmarks, migrationCols);
+          savePanelBookmarks(savedPanelBookmarks);
+          // Clean up migration hint after use
+          if (storedCols > 0) {
+            localStorage.removeItem('migration-grid-cols');
+          }
+          console.log(`Migrated full-screen bookmarks from index to (row, col) using cols=${migrationCols}${storedCols > 0 ? ' (from backup)' : ' (current viewport)'}`);
+        }
+
         if (savedPanelBookmarks.length === 0) {
           const currentFolderBookmarks = ((bookmarks as any).bookmarks || []).filter(
             (bm: any) => bm.parentId === bookmarks.currentFolder.id
           );
 
           if (currentFolderBookmarks.length > 0) {
-            const organized = organizeBookmarksForLayout(currentFolderBookmarks.map((bm: any) => ({
+            let organized = organizeBookmarksForLayout(currentFolderBookmarks.map((bm: any) => ({
               ...bm,
               name: bm.title || bm.name,
               title: bm.title || bm.name,
               url: bm.url ? normalizeUrl(bm.url) : bm.url,
               isPanelBookmark: true,
             })), settings.gridLayout);
-            
+
+            // Demo mode starts from a deliberately awkward arrangement rather
+            // than a tidy row, so layout regressions are visible at a glance.
+            // Compiled out of the real extension builds.
+            if (__DEMO__ && settings.gridLayout === "full-screen") {
+              organized = applyDemoLayout(organized);
+            }
+
             setPanelBookmarks(organized);
             savePanelBookmarks(organized);
+            // Carry the freshly organised layout into the sync pass below.
+            // Without this it keeps working from the empty list it loaded a
+            // moment ago, treats every bookmark as new, and re-places them all
+            // sequentially — silently discarding the arrangement just built.
+            savedPanelBookmarks = organized;
             setLastOrganizedLayout(settings.gridLayout);
             setHasOrganizedForLayout(true);
-            
+
             try {
               localStorage.setItem(ORGANIZED_LAYOUT_KEY, settings.gridLayout);
               localStorage.setItem(HAS_ORGANIZED_KEY, "true");
@@ -736,19 +1245,19 @@ export const Grid = observer(function Grid() {
         
         if (newBrowserBookmarks.length > 0) {
           if (settings.gridLayout === "full-screen") {
-            const totalSlots = gridDimensions.cols * gridDimensions.rows;
-            const availableIndexes = getNextAvailableIndexes(finalBookmarks, totalSlots, newBrowserBookmarks.length);
-            
-            const newPanelBookmarks = newBrowserBookmarks.slice(0, availableIndexes.length).map((bm: any, i: number) => ({
+            const availableCoords = getNextAvailableCoords(finalBookmarks, canvas.cols, canvas.rows, newBrowserBookmarks.length);
+
+            const newPanelBookmarks = newBrowserBookmarks.slice(0, availableCoords.length).map((bm: any, i: number) => ({
               ...bm,
               panel: "full-screen-panel",
               isPanelBookmark: true,
-              index: availableIndexes[i],
+              row: availableCoords[i].row,
+              col: availableCoords[i].col,
               name: bm.title || bm.name,
               title: bm.title || bm.name,
               url: bm.url ? normalizeUrl(bm.url) : bm.url,
             }));
-            
+
             finalBookmarks = [...finalBookmarks, ...newPanelBookmarks];
           } else {
             const panelOrder: PanelName[] = 
@@ -817,8 +1326,8 @@ export const Grid = observer(function Grid() {
   settings.gridLayout, 
   bookmarks.bookmarks,
   organizeBookmarksForLayout,
-  gridDimensions,
-  getNextAvailableIndexes
+  canvas,
+  getNextAvailableCoords
 ]);
 
 useEffect(() => {
@@ -847,21 +1356,28 @@ useEffect(() => {
 
   const handleBookmarkCreated = async (id: string, bookmark: any) => {
     if (bookmark.parentId === bookmarks.currentFolder?.id && bookmark.type === 'bookmark') {
-      const newPanelBookmark = {
+      const newPanelBookmark: any = {
         ...bookmark,
         name: bookmark.title || bookmark.name,
         title: bookmark.title || bookmark.name,
         url: bookmark.url ? normalizeUrl(bookmark.url) : bookmark.url,
-        panel: "top-left",
-        index: getNextIndexForPanel("top-left"),
         isPanelBookmark: true,
-        type: "bookmark"
+        type: "bookmark",
       };
+
+      if (settings.gridLayout === "full-screen") {
+        const coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
+        newPanelBookmark.panel = "full-screen-panel";
+        newPanelBookmark.row = coord.row;
+        newPanelBookmark.col = coord.col;
+      } else {
+        newPanelBookmark.panel = "top-left";
+        newPanelBookmark.index = getNextIndexForPanel("top-left");
+      }
 
       updatePanelBookmarksWithSave((current) => {
         const exists = current.some(bm => bm.id === id);
         if (exists) return current;
-        
         return [...current, newPanelBookmark];
       });
     }
@@ -896,7 +1412,7 @@ useEffect(() => {
   return () => {
     listeners.forEach(cleanup => cleanup());
   };
-}, [isRootSafe, bookmarks.currentFolder?.id, getNextIndexForPanel, updatePanelBookmarksWithSave]);
+}, [isRootSafe, bookmarks.currentFolder?.id, getNextIndexForPanel, updatePanelBookmarksWithSave, findEmptySlot, canvas, panelBookmarks, settings.gridLayout]);
 
   useEffect(() => {
     const newPanelCount = settings.gridLayout === "2-panel" ? 2 
@@ -912,15 +1428,26 @@ useEffect(() => {
   useEffect(() => {
     const checkFontSize = () => {
       const gridRef = topLeftGridRef.current;
-      if (gridRef) {
-        const fontSize = parseFloat(getComputedStyle(gridRef).fontSize);
-        setIsMaxFontSize(fontSize === 25.6);
-      }
+      if (!gridRef) return;
+      // The `.scale` clamp tops out at --dial-scale-max, which the max-scale
+      // slider drives. Compare against that instead of the old hardcoded 25.6px
+      // (1.6em), which silently stopped matching once the limit became settable.
+      if (!settings.limitDialScale) return setIsMaxFontSize(false);
+      const capPx = (settings.maxDialScale as number) * BASE_FONT_SIZE;
+      const fontSize = parseFloat(getComputedStyle(gridRef).fontSize);
+      setIsMaxFontSize(fontSize >= capPx - 0.5);
     };
     checkFontSize();
     window.addEventListener("resize", checkFontSize);
     return () => window.removeEventListener("resize", checkFontSize);
-  }, [settings.dialSize, settings.maxColumns, settings.squareDials, settings.gridLayout]);
+  }, [
+    settings.dialSize,
+    settings.maxColumns,
+    settings.squareDials,
+    settings.gridLayout,
+    settings.limitDialScale,
+    settings.maxDialScale,
+  ]);
 
   useEffect(() => {
     const handlePanelBookmarkModal = (event: CustomEvent) => {
@@ -1031,8 +1558,12 @@ useEffect(() => {
 
   // Drag handlers
   const handleDragStart = useCallback(
-    (e: React.DragEvent, panel: string, index: number, id: string) => {
-      draggedRef.current = { id, panel, index };
+    (e: React.DragEvent, panel: string, indexOrCoord: number | { row: number; col: number }, id: string) => {
+      if (panel === "full-screen-panel" && typeof indexOrCoord === "object") {
+        draggedRef.current = { id, panel, index: -1, row: indexOrCoord.row, col: indexOrCoord.col };
+      } else {
+        draggedRef.current = { id, panel, index: indexOrCoord as number };
+      }
       e.dataTransfer.effectAllowed = "move";
       try { e.dataTransfer.setData("text/plain", ""); } catch {}
 
@@ -1060,7 +1591,6 @@ useEffect(() => {
         } catch {}
       }
 
-      addFolderHoverListeners();
       addBreadcrumbListeners();
     },
     []
@@ -1071,60 +1601,21 @@ useEffect(() => {
       try { document.body.removeChild(dragImageRef.current); } catch {}
       dragImageRef.current = null;
     }
-    
-    cleanupFolderListeners();
+
     cleanupBreadcrumbListeners();
     clearAllDragStyles();
+    setDropTarget(null);
     draggedRef.current = null;
   }, [clearAllDragStyles]);
 
   // Folder operations
-  const addFolderHoverListeners = useCallback(() => {
-    const sortableItems = document.querySelectorAll("[data-id]");
-    sortableItems?.forEach((item: any) => {
-      const handleDragOver = (e: Event) => {
-        const dragEvent = e as DragEvent;
-        const draggedItem = document.querySelector(".sortable-chosen") || 
-                           document.querySelector("[draggable='true']:hover");
-        
-        if (draggedItem && draggedItem !== item) {
-          const rect = item.getBoundingClientRect();
-          const x = dragEvent.clientX - rect.left;
-          const width = rect.width;
-
-          if (isInDragZone(x, width) && item.getAttribute("data-type") === "folder") {
-            const targetId = item.getAttribute("data-id");
-            const d = draggedRef.current;
-            if (d && d.id === targetId) return;
-            item.classList.add("folder-drop-target");
-          } else {
-            item.classList.remove("folder-drop-target");
-          }
-        }
-      };
-
-      const handleDragLeave = (e: Event) => {
-        const dragEvent = e as DragEvent;
-        if (!item.contains(dragEvent.relatedTarget as Node)) {
-          item.classList.remove("folder-drop-target");
-        }
-      };
-
-      item.addEventListener("dragover", handleDragOver);
-      item.addEventListener("dragleave", handleDragLeave);
-      (item as any)._folderCleanup = () => {
-        item.removeEventListener("dragover", handleDragOver);
-        item.removeEventListener("dragleave", handleDragLeave);
-      };
-    });
-  }, []);
-
-  const cleanupFolderListeners = useCallback(() => {
-    const sortableItems = document.querySelectorAll("[data-id]");
-    sortableItems?.forEach((item: any) => {
-      if (item._folderCleanup) item._folderCleanup();
-    });
-  }, []);
+  // The old per-icon dragover listeners are gone. They attached two handlers to
+  // every icon on the desk at drag start, and each dragover ran two document
+  // queries — one of them `[draggable="true"]:hover` — which made dragging
+  // heavier the more icons you had. They also keyed off a `.sortable-chosen`
+  // class that nothing in this codebase ever sets, so folder highlighting never
+  // actually worked. Folder targeting is now derived from the cell under the
+  // pointer, in one place, with no listeners and no layout queries.
 
   const addBreadcrumbListeners = useCallback(() => {
     const breadcrumbElement = breadcrumbsRef.current;
@@ -1196,27 +1687,26 @@ useEffect(() => {
                               originalPanel;
       
       if (draggedBookmark) {
-        let nextIndex: number;
-        if (currentFolderPanel === "full-screen-panel") {
-          const totalSlots = gridDimensions.cols * gridDimensions.rows;
-          nextIndex = findEmptySlot(loadPanelBookmarks(), totalSlots);
-        } else {
-          nextIndex = getNextIndexForPanel(currentFolderPanel);
-        }
-        
-        const panelBookmarkEntry = {
+        const panelBookmarkEntry: any = {
           ...draggedBookmark,
           panel: currentFolderPanel,
           isPanelBookmark: true,
-          index: nextIndex,
         };
-        
+
+        if (currentFolderPanel === "full-screen-panel") {
+          const coord = findEmptySlot(loadPanelBookmarks(), canvas.cols, canvas.rows);
+          panelBookmarkEntry.row = coord.row;
+          panelBookmarkEntry.col = coord.col;
+        } else {
+          panelBookmarkEntry.index = getNextIndexForPanel(currentFolderPanel);
+        }
+
         const savedPanelBookmarks = loadPanelBookmarks();
         const updatedSavedBookmarks = [...savedPanelBookmarks, panelBookmarkEntry];
         savePanelBookmarks(updatedSavedBookmarks);
       }
     } catch (error) {}
-  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, gridDimensions]);
+  }, [panelBookmarks, getNextIndexForPanel, findEmptySlot, canvas]);
 
   const handleDropOnItem = useCallback((e: React.DragEvent, targetPanel: string, targetIndex: number, targetId: string, targetType: string) => {
     e.preventDefault();
@@ -1232,54 +1722,57 @@ useEffect(() => {
         moveBookmarkToFolder(d.id, targetId);
       }
     } else {
+      const safeIndex = Math.max(0, d.index);
       if (d.panel === targetPanel) {
-        reorderWithinPanel(targetPanel, d.index, targetIndex);
+        reorderWithinPanel(targetPanel, safeIndex, targetIndex);
       } else {
-        moveAcrossPanels(d.panel, d.index, targetPanel, targetIndex);
+        moveAcrossPanels(d.panel, safeIndex, targetPanel, targetIndex);
       }
     }
 
     draggedRef.current = null;
   }, [reorderWithinPanel, moveAcrossPanels, moveBookmarkToFolder, clearAllDragStyles]);
 
-  const handleDropOnSlot = useCallback((e: React.DragEvent, targetSlotIndex: number) => {
+  const handleDropOnSlot = useCallback((e: React.DragEvent, targetRow: number, targetCol: number) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     const d = draggedRef.current;
     if (!d) return;
 
     clearAllDragStyles();
 
-    if (d.panel === "full-screen-panel" && d.index === targetSlotIndex) {
+    if (d.panel === "full-screen-panel" && d.row === targetRow && d.col === targetCol) {
       draggedRef.current = null;
       return;
     }
 
     updatePanelBookmarksWithSave((currentBookmarks) => {
-      const fullScreenBookmarks = currentBookmarks.filter(b => b.panel === "full-screen-panel");
-      const targetBookmark = fullScreenBookmarks.find(b => b.index === targetSlotIndex);
+      const targetBookmark = currentBookmarks.find(
+        b => b.panel === "full-screen-panel" && b.row === targetRow && b.col === targetCol
+      );
 
-      const newBookmarks = currentBookmarks.map(bookmark => {
+      return currentBookmarks.map(bookmark => {
         if (bookmark.id === d.id) {
-          return { ...bookmark, panel: "full-screen-panel", index: targetSlotIndex };
+          return { ...bookmark, panel: "full-screen-panel", row: targetRow, col: targetCol };
         }
         if (targetBookmark && bookmark.id === targetBookmark.id) {
           if (d.panel === "full-screen-panel") {
-            return { ...bookmark, index: d.index };
+            return { ...bookmark, row: d.row!, col: d.col! };
           } else {
-            const emptySlot = findEmptySlot(currentBookmarks.filter(b => b.id !== d.id), gridDimensions.cols * gridDimensions.rows);
-            return { ...bookmark, index: emptySlot };
+            const empty = findEmptySlot(
+              currentBookmarks.filter(b => b.id !== d.id),
+              canvas.cols, canvas.rows
+            );
+            return { ...bookmark, row: empty.row, col: empty.col };
           }
         }
         return bookmark;
       });
-
-      return newBookmarks;
     });
-    
+
     draggedRef.current = null;
-  }, [clearAllDragStyles, gridDimensions, findEmptySlot, updatePanelBookmarksWithSave]);
+  }, [clearAllDragStyles, canvas, findEmptySlot, updatePanelBookmarksWithSave]);
 
   const handleDropOnPanelEnd = useCallback((e: React.DragEvent, targetPanel: string) => {
     e.preventDefault();
@@ -1291,17 +1784,13 @@ useEffect(() => {
     clearAllDragStyles();
 
     if (targetPanel === "full-screen-panel") {
-      const totalSlots = gridDimensions.cols * gridDimensions.rows;
-      const emptySlot = findEmptySlot(panelBookmarks, totalSlots);
-      
       updatePanelBookmarksWithSave((current) => {
-        const next = current.map(bookmark => 
-          bookmark.id === d.id 
-            ? { ...bookmark, panel: "full-screen-panel", index: emptySlot }
+        const empty = findEmptySlot(current, canvas.cols, canvas.rows);
+        return current.map(bookmark =>
+          bookmark.id === d.id
+            ? { ...bookmark, panel: "full-screen-panel", row: empty.row, col: empty.col }
             : bookmark
         );
-        
-        return next;
       });
     } else {
       const panelItems = panelBookmarks
@@ -1317,7 +1806,7 @@ useEffect(() => {
     }
     
     draggedRef.current = null;
-  }, [panelBookmarks, reorderWithinPanel, moveAcrossPanels, clearAllDragStyles, gridDimensions, findEmptySlot, updatePanelBookmarksWithSave]);
+  }, [panelBookmarks, reorderWithinPanel, moveAcrossPanels, clearAllDragStyles, canvas, findEmptySlot, updatePanelBookmarksWithSave]);
 
   // Drag event handlers
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1368,16 +1857,20 @@ useEffect(() => {
           url: normalizedUrl,
         });
         
-        updatePanelBookmarksWithSave((current) => 
+        updatePanelBookmarksWithSave((current) =>
           current.map((b) =>
             b.id === modals.editingBookmarkId
-              ? { 
-                  ...b, 
-                  name: data.title, 
-                  title: data.title, 
+              ? {
+                  ...b,
+                  name: data.title,
+                  title: data.title,
                   url: normalizedUrl,
                   panel: data.panel || targetPanel,
-                  index: targetSlotIndex !== null ? targetSlotIndex : b.index
+                  ...(targetPanel === "full-screen-panel" || (data.panel || targetPanel) === "full-screen-panel"
+                    ? (targetSlotIndex !== null
+                        ? { row: targetSlotIndex.row, col: targetSlotIndex.col }
+                        : { row: b.row, col: b.col })
+                    : { index: b.index }),
                 }
               : b
           )
@@ -1392,28 +1885,30 @@ useEffect(() => {
     } else {
       // NEW BOOKMARK
       try {
-        let nextIndex = getNextIndexForPanel(targetPanel);
-        
-        if (targetPanel === "full-screen-panel") {
-          if (targetSlotIndex !== null) {
-            nextIndex = targetSlotIndex;
-            setTargetSlotIndex(null);
-          } else {
-            nextIndex = findEmptySlot(panelBookmarks, gridDimensions.cols * gridDimensions.rows);
-          }
-        }
-
         const tempId = `temp-${Date.now()}-${Math.random()}`;
-        const panelBookmarkEntry = {
+        const panelBookmarkEntry: any = {
           name: data.title,
           title: data.title,
           type: "bookmark" as const,
-          index: nextIndex,
           url: normalizedUrl,
           panel: targetPanel,
           id: tempId,
           isPanelBookmark: true,
         };
+
+        if (targetPanel === "full-screen-panel") {
+          let coord: { row: number; col: number };
+          if (targetSlotIndex !== null) {
+            coord = targetSlotIndex;
+            setTargetSlotIndex(null);
+          } else {
+            coord = findEmptySlot(panelBookmarks, canvas.cols, canvas.rows);
+          }
+          panelBookmarkEntry.row = coord.row;
+          panelBookmarkEntry.col = coord.col;
+        } else {
+          panelBookmarkEntry.index = getNextIndexForPanel(targetPanel);
+        }
 
         updatePanelBookmarksWithSave((current) => [...current, panelBookmarkEntry]);
 
@@ -1457,10 +1952,16 @@ useEffect(() => {
 
   // Render helpers
   const getBookmarksByPanel = useCallback(
-    (panelName: string) =>
-      panelBookmarks
-        .filter((bm) => bm.panel === panelName)
-        .sort((a, b) => (a.index ?? 0) - (b.index ?? 0)),
+    (panelName: string) => {
+      const filtered = panelBookmarks.filter((bm) => bm.panel === panelName);
+      if (panelName === "full-screen-panel") {
+        return filtered.sort((a, b) => {
+          const rowDiff = (a.row ?? 0) - (b.row ?? 0);
+          return rowDiff !== 0 ? rowDiff : (a.col ?? 0) - (b.col ?? 0);
+        });
+      }
+      return filtered.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    },
     [panelBookmarks]
   );
 
@@ -1566,110 +2067,258 @@ useEffect(() => {
 
   const renderFullScreenPanel = () => {
     const list = getBookmarksByPanel("full-screen-panel");
-    const totalSlots = gridDimensions.cols * gridDimensions.rows;
+    const { cols, rows, scale } = plan;
+    // The desk is laid out ONCE at its logical size and zoomed by a single
+    // transform, so nothing about the arrangement depends on the window.
+    const logicalCell = logicalCellSize(settings.squareDials as boolean);
+    const logicalGap = logicalCell * GAP_RATIO;
+    const logical = canvasPixelSize(cols, rows, logicalCell);
 
-    const gridMap = new Array(totalSlots).fill(null);
-    
+    // A stored cell is simply a cell on the desk — no offset, nothing derived
+    // from where the other icons happen to be.
+    const occupiedMap = new Map<string, any>();
+    const spare: any[] = [];
     list.forEach((bm) => {
-      const slotIndex = bm.index ?? 0;
-      if (slotIndex >= 0 && slotIndex < totalSlots) {
-        gridMap[slotIndex] = bm;
+      const row = bm.row ?? 0;
+      const col = bm.col ?? 0;
+      const inBounds = row >= 0 && col >= 0 && row < rows && col < cols;
+      const key = inBounds ? coordToKey(row, col) : "";
+      if (inBounds && !occupiedMap.has(key)) {
+        occupiedMap.set(key, bm);
+      } else {
+        spare.push(bm);
       }
     });
+    // Last-resort placement for bookmarks that share a coordinate. The desk is
+    // sized to contain the whole content block, so this normally stays empty.
+    let oi = 0;
+    for (let r = 0; r < rows && oi < spare.length; r++) {
+      for (let c = 0; c < cols && oi < spare.length; c++) {
+        const key = coordToKey(r, c);
+        if (!occupiedMap.has(key)) occupiedMap.set(key, spare[oi++]);
+      }
+    }
 
-    const handleSlotDoubleClick = (slotIndex: number) => {
-      if (!gridMap[slotIndex]) {
-        setTargetSlotIndex(slotIndex);
+    // Generate all visible cells
+    const cells: { row: number; col: number; bm: any | null }[] = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        cells.push({ row: r, col: c, bm: occupiedMap.get(coordToKey(r, c)) || null });
+      }
+    }
+
+    const handleSlotDoubleClick = (row: number, col: number) => {
+      if (!occupiedMap.has(coordToKey(row, col))) {
+        setTargetSlotIndex({ row, col });
         targetPanelRef.current = "full-screen-panel";
         openModalForPanel("full-screen-panel");
       }
     };
 
-    const handleSlotRightClick = (e: React.MouseEvent, slotIndex: number) => {
+    const handleSlotRightClick = (e: React.MouseEvent, row: number, col: number) => {
       e.preventDefault();
-      if (!gridMap[slotIndex]) {
-        setTargetSlotIndex(slotIndex);
+      if (!occupiedMap.has(coordToKey(row, col))) {
+        setTargetSlotIndex({ row, col });
       }
+    };
+
+    const anchorAtCorner = settings.deskAnchor === "top-left";
+
+    // Which cell is under the pointer, and what dropping there would do.
+    //
+    // Worked out from coordinates rather than from per-cell drop targets: the
+    // gaps between cells belong to no cell, so a drop landing in one used to
+    // miss every target, bubble up to the panel and send the icon to the first
+    // free cell instead of where it was aimed. Rounding the pointer to the
+    // nearest cell makes every pixel of the desk a valid, predictable target.
+    const cellUnderPointer = (clientX: number, clientY: number) => {
+      const grid = fullScreenGridRef.current;
+      if (!grid) return null;
+      const rect = grid.getBoundingClientRect();
+      const step = (logicalCell + logicalGap) * scale;
+      if (step <= 0) return null;
+      const clamp = (value: number, max: number) =>
+        Math.max(0, Math.min(max, value));
+      // Clamped, not rejected: a drop just past the edge snaps to the nearest
+      // cell rather than silently doing nothing.
+      const col = clamp(Math.floor((clientX - rect.left) / step), cols - 1);
+      const row = clamp(Math.floor((clientY - rect.top) / step), rows - 1);
+
+      const occupant = occupiedMap.get(coordToKey(row, col));
+      const dragged = draggedRef.current;
+      // Dropping onto the middle of a folder files the icon inside it; the
+      // edges of the same cell still mean "put it here", so a folder never
+      // becomes a place you cannot drop next to.
+      const withinCell = (clientX - rect.left) / step - col;
+      const overFolderCore =
+        occupant?.type === "folder" &&
+        occupant.id !== dragged?.id &&
+        Math.abs(withinCell - 0.5) < dropZonePercent / 2;
+
+      return {
+        row,
+        col,
+        intent: overFolderCore
+          ? ("folder" as const)
+          : occupant && occupant.id !== dragged?.id
+            ? ("swap" as const)
+            : ("move" as const),
+        occupant,
+      };
+    };
+
+    const handleDeskDragOver = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const target = cellUnderPointer(e.clientX, e.clientY);
+      setDropTarget((prev) =>
+        !target
+          ? null
+          : prev &&
+              prev.row === target.row &&
+              prev.col === target.col &&
+              prev.intent === target.intent
+            ? prev
+            : { row: target.row, col: target.col, intent: target.intent },
+      );
+    };
+
+    const handleDeskDrop = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropTarget(null);
+      const target = cellUnderPointer(e.clientX, e.clientY);
+      const dragged = draggedRef.current;
+      if (!target || !dragged) return;
+
+      if (target.intent === "folder" && target.occupant) {
+        moveBookmarkToFolder(dragged.id, target.occupant.id);
+        draggedRef.current = null;
+        return;
+      }
+      handleDropOnSlot(e, target.row, target.col);
     };
 
     return (
       <div
-        className={clsx("Grid", isMaxFontSize && "max-width")}
-        style={
-          {
-            display: "grid",
-            gridTemplateColumns: `repeat(${gridDimensions.cols}, 1fr)`,
-            gridTemplateRows: `repeat(${gridDimensions.rows}, 1fr)`,
-            gap: "8px",
-            overflowX: "hidden",
-            overflowY: "hidden",
-            height: "100vh",
-            padding: "20px",
-            boxSizing: "border-box",
-          } as React.CSSProperties
-        }
+        className="FullScreenViewport"
+        style={{
+          // Fallback for the standalone case; Bookmarks/styles.css overrides
+          // this with a flex fill so a banner shrinks the area instead of
+          // pushing the desk past the fold.
+          height: "100vh",
+          width: "100%",
+          display: "flex",
+          // Where the desk is held. Centre keeps the content block in the middle
+          // of every screen; top-left pins it to a fixed corner. Either way it is
+          // a FIXED relationship, which is what stops it appearing to drift.
+          alignItems: anchorAtCorner ? "flex-start" : "center",
+          justifyContent: anchorAtCorner ? "flex-start" : "center",
+          // Never scrolls: the desk always zooms far enough to fit.
+          overflow: "hidden",
+          padding: "20px",
+          boxSizing: "border-box",
+        }}
         ref={bottomFullGridRef}
-        data-panel="full-screen-panel"
         onDragOver={handleDragOver}
         onDragEnter={handlePanelDragEnter}
         onDragLeave={handlePanelDragLeave}
         onDrop={(e) => handleDropOnPanelEnd(e, "full-screen-panel")}
       >
-        {gridMap.map((bm, slotIndex) => (
+      {/* A transform doesn't change layout size, so the desk gets a spacer at
+          its SCALED dimensions. Without it, centring and scrolling would work
+          off the unscaled size and place the desk wrongly. */}
+      <div
+        className="FullScreenDesk"
+        style={{
+          position: "relative",
+          flex: "0 0 auto",
+          width: `${logical.width * scale}px`,
+          height: `${logical.height * scale}px`,
+        }}
+      >
+      <div
+        className={clsx("Grid", isMaxFontSize && "max-width")}
+        style={
+          {
+            // Laid out at the LOGICAL size and zoomed as a whole: one transform
+            // carries cell size, gaps, radii, padding and text together, so the
+            // arrangement is identical at every resolution.
+            fontSize: `${BASE_FONT_SIZE}px`,
+            display: "grid",
+            gridTemplateColumns: `repeat(${cols}, ${logicalCell}px)`,
+            gridTemplateRows: `repeat(${rows}, ${logicalCell}px)`,
+            gap: `${logicalGap}px`,
+            width: `${logical.width}px`,
+            height: `${logical.height}px`,
+            // .Grid ships a max-width rule for the column-limited panel layouts;
+            // it must not clip the desk here.
+            maxWidth: "none",
+            position: "absolute",
+            top: 0,
+            left: 0,
+            transform: `scale(${scale})`,
+            transformOrigin: "top left",
+            // Everything inside is drawn at the logical size and then shrunk by
+            // `scale`, which would make a 2px drop outline land as 0.8px on a
+            // typical desk. Feedback lines divide by this so they keep their
+            // weight on screen whatever the zoom.
+            ["--desk-scale" as never]: `${scale}`,
+            padding: 0,
+            margin: 0,
+            overflow: "visible",
+          } as React.CSSProperties
+        }
+        data-panel="full-screen-panel"
+        ref={fullScreenGridRef}
+        // One drop target for the whole desk. Cells are worked out from the
+        // pointer, so the gaps between them are live too.
+        onDragOver={handleDeskDragOver}
+        onDrop={handleDeskDrop}
+      >
+        {cells.map(({ row, col, bm }) => {
+          const isTarget =
+            dropTarget?.row === row && dropTarget?.col === col;
+          return (
           <div
-            key={`slot-${slotIndex}`}
-            className="grid-slot"
-            data-slot-index={slotIndex}
+            key={`slot-${row}-${col}`}
+            className={clsx(
+              "grid-slot",
+              isTarget && `drop-target drop-${dropTarget.intent}`,
+            )}
+            data-slot-row={row}
+            data-slot-col={col}
             style={{
+              gridColumn: col + 1,
+              gridRow: row + 1,
               position: 'relative',
-              minHeight: '60px',
-              minWidth: '60px',
-              transition: 'all 0.2s ease',
+              minHeight: 0,
+              minWidth: 0,
               borderRadius: '8px',
               cursor: bm ? 'grab' : 'pointer',
             }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.dataTransfer.dropEffect = 'move';
-            }}
-            onDragEnter={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.currentTarget.classList.add('drag-over-slot');
-            }}
-            onDragLeave={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                e.currentTarget.classList.remove('drag-over-slot');
-              }
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.currentTarget.classList.remove('drag-over-slot');
-              handleDropOnSlot(e, slotIndex);
-            }}
-            onDoubleClick={() => handleSlotDoubleClick(slotIndex)}
-            onContextMenu={(e) => handleSlotRightClick(e, slotIndex)}
+            onDoubleClick={() => handleSlotDoubleClick(row, col)}
+            onContextMenu={(e) => handleSlotRightClick(e, row, col)}
           >
             {bm && (
               <div
                 data-id={bm.id}
                 data-type={bm.type}
-                data-current-slot={slotIndex}
+                data-current-row={row}
+                data-current-col={col}
                 draggable
-                onDragStart={(e) => {
-                  handleDragStart(e, "full-screen-panel", slotIndex, bm.id);
-                }}
+                onDragStart={(e) => handleDragStart(e, "full-screen-panel", { row, col }, bm.id)}
                 onDragEnd={handleDragEnd}
+                className={clsx(draggedRef.current?.id === bm.id && "is-dragging")}
                 style={{
-                  transition: 'all 0.2s ease',
                   borderRadius: '8px',
                   cursor: 'grab',
                   width: '100%',
                   height: '100%',
+                  // Left interactive so a drag can start here. Dragover events
+                  // bubble to the desk, which is why the per-slot handlers —
+                  // and their stopPropagation, the thing that actually broke
+                  // drops in the gaps — are gone rather than replaced.
                   pointerEvents: 'auto',
                 }}
               >
@@ -1677,7 +2326,10 @@ useEffect(() => {
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
+      </div>
+      </div>
       </div>
     );
   };
@@ -1776,61 +2428,89 @@ useEffect(() => {
   };
 
   const dragStyles = `
-    .drag-over {
-      background: rgba(99, 102, 241, 0.1) !important;
-      border: 2px dashed rgba(99, 102, 241, 0.5) !important;
-      transform: scale(0.95);
-      border-radius: 8px !important;
+    /* Drop feedback. The three possible outcomes look different on purpose:
+       "put it here", "swap with this one" and "file it inside this folder" are
+       materially different results, and the user has to be able to tell which
+       one they are about to get while the pointer is still down. */
+
+    .grid-slot.drop-target::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      /* Widths and radii are divided by the desk zoom so the feedback reads at
+         a constant weight on screen instead of thinning away as icons shrink. */
+      --line: calc(2.5px / var(--desk-scale, 1));
+      border-radius: calc(10px / var(--desk-scale, 1));
+      pointer-events: none;
+      transition: background-color 0.12s ease, box-shadow 0.12s ease;
     }
-    
-    .drag-over-panel {
-      background: rgba(99, 102, 241, 0.05) !important;
-      border: 2px dashed rgba(99, 102, 241, 0.3) !important;
+
+    /* Move into an empty cell — a quiet outline, since nothing is displaced. */
+    .grid-slot.drop-move::after {
+      background: rgba(255, 255, 255, 0.12);
+      box-shadow: inset 0 0 0 var(--line) rgba(255, 255, 255, 0.75);
     }
-    
-    .drag-over-slot {
-      background: rgba(99, 102, 241, 0.15) !important;
-      border: 2px dashed rgba(99, 102, 241, 0.5) !important;
-      transform: scale(1.02);
+
+    /* Swap with the icon already there — amber, because something else moves
+       too, and that deserves a warmer, more attention-getting cue. */
+    .grid-slot.drop-swap::after {
+      background: rgba(234, 179, 8, 0.2);
+      box-shadow: inset 0 0 0 var(--line) rgba(234, 179, 8, 0.95);
     }
-    
-    .folder-drop-target {
-      background: rgba(34, 197, 94, 0.1) !important;
-      border: 2px dashed rgba(34, 197, 94, 0.5) !important;
-      transform: scale(1.05);
-      box-shadow: 0 0 20px rgba(34, 197, 94, 0.3) !important;
+
+    /* File inside a folder — green, and the folder swells slightly to read as
+       a container opening rather than a cell being occupied. */
+    .grid-slot.drop-folder::after {
+      background: rgba(34, 197, 94, 0.22);
+      box-shadow: inset 0 0 0 var(--line) rgba(34, 197, 94, 1);
     }
-    
+    .grid-slot.drop-folder > * {
+      transform: scale(1.08);
+      transition: transform 0.12s ease;
+    }
+
+    /* The icon being carried fades, so the eye follows the drag image. */
+    .is-dragging {
+      opacity: 0.35;
+    }
+
+    /* Empty cells answer the pointer, so the grid is discoverable rather than
+       looking like blank wallpaper. */
+    .grid-slot:empty:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: calc(8px / var(--desk-scale, 1));
+    }
+
     .breadcrumb-drop-target {
       background: rgba(234, 179, 8, 0.1) !important;
       border: 2px dashed rgba(234, 179, 8, 0.5) !important;
       border-radius: 8px !important;
       padding: 8px 16px !important;
     }
-    
-    .grid-slot:empty:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px dashed rgba(255, 255, 255, 0.2);
+
+    .drag-over {
+      background: rgba(99, 102, 241, 0.1) !important;
+      border: 2px dashed rgba(99, 102, 241, 0.5) !important;
+      border-radius: 8px !important;
     }
-    
-    .grid-slot:empty:active {
-      background: rgba(255, 255, 255, 0.1);
+
+    .drag-over-panel {
+      background: rgba(99, 102, 241, 0.05) !important;
+      border: 2px dashed rgba(99, 102, 241, 0.3) !important;
     }
-    
+
     [draggable="true"] {
-      cursor: grab !important;
+      cursor: grab;
     }
-    
-    [draggable="true"]:hover:not(.drag-over):not(.folder-drop-target) {
-      transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    }
-    
+
     [draggable="true"]:active {
-      cursor: grabbing !important;
+      cursor: grabbing;
     }
-    
-    * {
+
+    /* Scoped to the desk: a global user-select reset also disabled selection in
+       the settings panel and every modal. */
+    .FullScreenViewport,
+    .Grid {
       user-select: none;
     }
   `;

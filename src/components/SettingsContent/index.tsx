@@ -11,6 +11,7 @@ import { wallpapers } from "#lib/wallpapers";
 import { bookmarks } from "#stores/useBookmarks";
 import { colorPicker } from "#stores/useColorPicker";
 import { settings } from "#stores/useSettings";
+import { DeskProfiles } from "./DeskProfiles.tsx";
 import { Switch } from "./Switch.tsx";
 
 export const SettingsContent = observer(function SettingsContent() {
@@ -19,9 +20,14 @@ export const SettingsContent = observer(function SettingsContent() {
     handleCustomColor,
     handleCustomImage,
     handleDefaultFolder,
+    handleBasePage,
+    handleDeskAnchor,
     handleDialSize,
+    handleGridCanvas,
     handleGridLayout,
+    handleLimitDialScale,
     handleMaxColumns,
+    handleMaxDialScale,
     handleNewTab,
     handleShowTitle,
     handleSquareDials,
@@ -35,7 +41,15 @@ export const SettingsContent = observer(function SettingsContent() {
   } = settings;
 
   const [defaultFolderValue, setDefaultFolderValue] = useState("");
-  
+
+  // 0/0 means automatic: the desk takes the screen's shape and is scaled to
+  // the icons' reach. Show a sensible starting point in the manual controls so
+  // they never display a zero.
+  const fixedDesk =
+    (settings.gridCols as number) > 0 && (settings.gridRows as number) > 0;
+  const canvasCols = fixedDesk ? (settings.gridCols as number) : 14;
+  const canvasRows = fixedDesk ? (settings.gridRows as number) : 7;
+
   const wallpaperColors = [
     "Dark",
     "Light", 
@@ -226,6 +240,187 @@ export const SettingsContent = observer(function SettingsContent() {
           <CaretDown />
         </div>
       </div>
+      {settings.gridLayout === "full-screen" && (
+        <>
+          <div className="setting-wrapper setting-group canvas-size-group">
+            <div className="setting-label">
+              <div className="setting-title" id="base-page-title">
+                Starting Desk Size
+              </div>
+              <div className="setting-description" id="base-page-description">
+                How much desk an <em>empty</em> desktop begins with, given as the
+                screen it should fill &mdash; a 24&Prime; monitor by default.
+                Once you have placed icons, this no longer applies: from then on
+                the desk is sized by how far your furthest icon reaches, and it
+                grows as you move icons outwards.
+              </div>
+            </div>
+            <div className="setting-option canvas-size-control">
+              <div className="canvas-size-row">
+                <label className="canvas-size-field">
+                  <span>Width</span>
+                  <input
+                    type="number"
+                    min={320}
+                    max={7680}
+                    step={80}
+                    value={settings.basePageWidth as number}
+                    onChange={(e) =>
+                      handleBasePage(
+                        parseInt(e.target.value, 10),
+                        settings.basePageHeight as number,
+                      )
+                    }
+                    className="input canvas-size-input"
+                    aria-label="Base screen width in pixels"
+                  />
+                </label>
+                <span className="canvas-size-times" aria-hidden="true">
+                  &times;
+                </span>
+                <label className="canvas-size-field">
+                  <span>Height</span>
+                  <input
+                    type="number"
+                    min={240}
+                    max={4320}
+                    step={60}
+                    value={settings.basePageHeight as number}
+                    onChange={(e) =>
+                      handleBasePage(
+                        settings.basePageWidth as number,
+                        parseInt(e.target.value, 10),
+                      )
+                    }
+                    className="input canvas-size-input"
+                    aria-label="Base screen height in pixels"
+                  />
+                </label>
+              </div>
+              <span className="canvas-preview-caption">
+                empty desktop only
+              </span>
+            </div>
+          </div>
+
+          <div className="setting-wrapper setting-group">
+            <div className="setting-label">
+              <div className="setting-title" id="desk-anchor-title">
+                Desk Anchor
+              </div>
+              <div className="setting-description" id="desk-anchor-description">
+                Where your icons are held as the screen changes size. Either way
+                the relationship is fixed, so nothing appears to drift.
+              </div>
+            </div>
+            <div className="setting-option select">
+              <select
+                onChange={(e) => handleDeskAnchor(e.target.value)}
+                value={settings.deskAnchor as string}
+                className="input"
+                aria-labelledby="desk-anchor-title"
+                aria-describedby="desk-anchor-description"
+              >
+                <option value="center">Centred</option>
+                <option value="top-left">Top left corner</option>
+              </select>
+              <CaretDown />
+            </div>
+          </div>
+
+          <div className="setting-wrapper setting-group canvas-size-group">
+            <div className="setting-label">
+              <div className="setting-title" id="grid-canvas-title">
+                Fixed Desk Size
+              </div>
+              <div className="setting-description" id="grid-canvas-description">
+                Optional. Pin the desk to an exact number of columns and rows and
+                it will never take the screen&rsquo;s shape or crop &mdash; just
+                scale. Leave it off to let the desk fill the window and follow
+                your icons.
+              </div>
+            </div>
+            <div className="setting-option canvas-size-control">
+              <Switch
+                aria-labelledby="grid-canvas-title"
+                aria-describedby="grid-canvas-description"
+                onClick={() =>
+                  fixedDesk
+                    ? handleGridCanvas(0, 0)
+                    : handleGridCanvas(canvasCols, canvasRows)
+                }
+                className="switch-root"
+                checked={fixedDesk}
+              >
+                <span className="switch-thumb" />
+              </Switch>
+              {fixedDesk && (
+                <>
+                  <div className="canvas-size-row">
+                    <label className="canvas-size-field">
+                      <span>Columns</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={canvasCols}
+                        onChange={(e) =>
+                          handleGridCanvas(
+                            parseInt(e.target.value, 10),
+                            canvasRows,
+                          )
+                        }
+                        className="input canvas-size-input"
+                        aria-label="Desk columns"
+                      />
+                    </label>
+                    <span className="canvas-size-times" aria-hidden="true">
+                      &times;
+                    </span>
+                    <label className="canvas-size-field">
+                      <span>Rows</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={40}
+                        value={canvasRows}
+                        onChange={(e) =>
+                          handleGridCanvas(
+                            canvasCols,
+                            parseInt(e.target.value, 10),
+                          )
+                        }
+                        className="input canvas-size-input"
+                        aria-label="Desk rows"
+                      />
+                    </label>
+                  </div>
+                  <div className="canvas-preview" aria-hidden="true">
+                    <div
+                      className="canvas-preview-frame"
+                      style={{
+                        gridTemplateColumns: `repeat(${canvasCols}, 1fr)`,
+                        gridTemplateRows: `repeat(${canvasRows}, 1fr)`,
+                        aspectRatio: `${canvasCols} / ${canvasRows}`,
+                      }}
+                    >
+                      {Array.from(
+                        { length: canvasCols * canvasRows },
+                        (_, i) => (
+                          <span className="canvas-preview-cell" key={i} />
+                        ),
+                      )}
+                    </div>
+                    <span className="canvas-preview-caption">
+                      {canvasCols * canvasRows} slots
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      )}
       <div className="setting-wrapper setting-group">
         <div className="setting-label">
           <div className="setting-title" id="color-scheme-title">
@@ -350,6 +545,70 @@ export const SettingsContent = observer(function SettingsContent() {
           <CaretDown />
         </div>
       </div>
+      {settings.gridLayout === "full-screen" && <DeskProfiles />}
+      {settings.dialSize === "scale" && (
+        <div className="setting-wrapper setting-group scale-limit-group">
+          <div className="setting-label">
+            <div className="setting-title" id="scale-limit-title">
+              Maximum Scale Limit
+            </div>
+            <div
+              className="setting-description"
+              id="scale-limit-description"
+            >
+              Limit how large dials grow on big screens. Turn off for unlimited
+              growth, or set the maximum size.
+            </div>
+          </div>
+          <div className="setting-option scale-limit-control">
+            <Switch
+              aria-labelledby="scale-limit-title"
+              aria-describedby="scale-limit-description"
+              onClick={() => handleLimitDialScale(!settings.limitDialScale)}
+              className="switch-root"
+              checked={settings.limitDialScale as boolean}
+            >
+              <span className="switch-thumb" />
+            </Switch>
+            {settings.limitDialScale && (
+              <>
+                <div
+                  className="scale-slider-row"
+                  style={{ display: "flex", alignItems: "center" }}
+                >
+                  <input
+                    type="range"
+                    min={1}
+                    max={4}
+                    step={0.1}
+                    value={settings.maxDialScale}
+                    onChange={(e) =>
+                      handleMaxDialScale(parseFloat(e.target.value))
+                    }
+                    className="scale-slider"
+                    aria-label="Maximum dial scale"
+                  />
+                  <span className="scale-value">
+                    {settings.maxDialScale.toFixed(1)}×
+                  </span>
+                </div>
+                <div className="scale-preview" aria-hidden="true">
+                  <div
+                    className="scale-preview-box"
+                    style={{
+                      width: `${Math.round(settings.maxDialScale * 30)}px`,
+                      height: `${Math.round(settings.maxDialScale * 30)}px`,
+                    }}
+                  >
+                    <span className="scale-preview-glyph">A</span>
+                  </div>
+                  <span className="scale-preview-caption">Preview</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <div className="setting-wrapper setting-group">
         <div className="setting-label">
           <div className="setting-title" id="square-dials-title">

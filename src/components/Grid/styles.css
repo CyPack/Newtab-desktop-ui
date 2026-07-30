@@ -107,7 +107,7 @@
 
   .scale & {
     font-size: clamp(
-      0.4em,
+      var(--dial-scale-min, 0.4em),
       calc(
         (100vw - 2 * var(--grid-padding)) /
           (
@@ -116,7 +116,7 @@
           ) -
           1px
       ),
-      1.6em
+      var(--dial-scale-max, 1.6em)
     );
   }
 }

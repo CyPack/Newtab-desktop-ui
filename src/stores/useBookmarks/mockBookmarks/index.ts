@@ -89,6 +89,86 @@ export const mockBookmarks = [
     "#ffffff",
     youTubeThumbnail,
   ],
+  // No thumbnail on these: the dial falls back to a coloured tile with the
+  // site's initial, which is enough to tell them apart while testing layout.
+  [
+    "https://github.com",
+    "GitHub",
+    "1a4f2c90-11c1-4a7e-9a01-2f5b6c8d0e11",
+    "#24292f",
+  ],
+  [
+    "https://open.spotify.com",
+    "Spotify",
+    "2b503da1-22d2-4b8f-8b12-3f6c7d9e1f22",
+    "#1db954",
+  ],
+  [
+    "https://www.netflix.com",
+    "Netflix",
+    "3c614eb2-33e3-4c90-7c23-4a7d8e0f2033",
+    "#e50914",
+  ],
+  [
+    "https://www.reddit.com",
+    "Reddit",
+    "4d725fc3-44f4-4da1-6d34-5b8e9f102144",
+    "#ff4500",
+  ],
+  [
+    "https://en.wikipedia.org",
+    "Wikipedia",
+    "5e8360d4-55a5-4eb2-5e45-6c9f00213255",
+    "#f8f9fa",
+  ],
+  [
+    "https://www.linkedin.com",
+    "LinkedIn",
+    "6f9471e5-66b6-4fc3-4f56-7d0a11324366",
+    "#0a66c2",
+  ],
+  [
+    "https://x.com",
+    "X",
+    "70a582f6-77c7-40d4-3067-8e1b22435477",
+    "#111111",
+  ],
+  [
+    "https://www.instagram.com",
+    "Instagram",
+    "81b69307-88d8-41e5-2178-9f2c33546588",
+    "#e4405f",
+  ],
+  [
+    "https://www.twitch.tv",
+    "Twitch",
+    "92c7a418-99e9-42f6-1289-a03d44657699",
+    "#9146ff",
+  ],
+  [
+    "https://store.steampowered.com",
+    "Steam",
+    "a3d8b529-aafa-4307-039a-b14e557687aa",
+    "#171a21",
+  ],
+  [
+    "https://www.notion.so",
+    "Notion",
+    "b4e9c63a-bb0b-4418-14ab-c25f668798bb",
+    "#f1f1ef",
+  ],
+  [
+    "https://www.figma.com",
+    "Figma",
+    "c5fad74b-cc1c-4529-25bc-d360778989cc",
+    "#f24e1e",
+  ],
+  [
+    "https://slack.com",
+    "Slack",
+    "d60be85c-dd2d-463a-36cd-e4718899a0dd",
+    "#4a154b",
+  ],
 ];
 
 const topSitesUS = [
