@@ -598,3 +598,88 @@ I1 dizilim sabitliği PASS · I2 sürükleme izolasyonu 0/23 · I6 serbest bıra
 > ⚠️ **`ntdui-page-probe.mjs` içindeki "whole-page rounding" kriteri EMEKLİ** — puanlanmıyor,
 > yalnız raporlanıyor. Sayfa yuvarlaması bilerek terk edildi (aşağı yuvarlama ölü bölge
 > bırakıyordu). Bu satırın `false` olması **doğru davranıştır**; verdict'i düşürmemeli.
+
+---
+
+## Masa yakınlaştırma + emekli sayfa modelinin kalıntıları (2026-07-30, ikinci tur)
+
+Üç soru soruldu, üçü de farklı cevap verdi. Sırayla ve **ölçerek**.
+
+### 1. Yedek yeni mimariyi taşıyor mu? — EVET, tam turla kanıtlandı
+
+Alan listesini okumak yetmez; asıl soru dizilimin **tam turu** atlatıp atlatmadığı:
+
+```
+diz (köşe iddiası dahil) -> Backup -> her şeyi karıştır -> Restore -> birebir aynı mı?
+```
+
+`probes-newtab-desktop-ui/nt-roundtrip.mjs` — **8/8**:
+ölçek iddiaya göre düştü · yedek yazıldı · **10 masa ayarının hepsi dosyada** ·
+her ikonun (row,col) dosyada · masa karıştırıldı · **26/26 ikon tam hücresine döndü** ·
+**aktif alan yeniden türedi (erişim 13x23 -> 13x23)** · masa hâlâ iddiaya göre ölçekli.
+
+> **Aktif alan hiçbir yerde saklanmıyor — saklanmamalı da.** İkonların erişiminden yeniden
+> türetiliyor. "Bölge genişletme yedeklendi mi?" sorusunun cevabı bu yüzden "ikonlar doğru
+> hücreye döndü mü?" sorusuna eşit. Döndüler.
+
+> ⚠️ **Ölçüm tuzağı:** hücre px'i iki okuma arasında farklıydı (0.2816 vs 0.3020) ve bu bir an
+> regresyon sanıldı. Sebep **AlertBanner**: bir okumada vardı, diğerinde yoktu → kullanılabilir
+> yükseklik 842 vs 900px. Karşılaştırılması gereken **erişim**, hücre px'i değil.
+
+**Kapatılan boşluk:** `before-restore` snapshot'ı yalnız `browser.bookmarks` dalındaydı.
+Local-only ve hata dalları dizilimi aynı şekilde eziyordu ama snapshot almıyordu. Üçünün de
+üstüne taşındı.
+
+**Boşluk sanılıp boşluk çıkmayan:** `has-organized` / `organized-layout` anahtarları yedeğe
+girmiyor. Temizlenip yeniden yüklendi → **26/26 korundu** (kayıtlı konum varken yeniden düzenleme
+yapılmıyor). Varsayımla "eksik" denip eklenmedi.
+
+### 2. İkon/grid ölçek barı — `deskZoom`
+
+```
+capCell = maxCellSize(dialSize, squareDials, limitScale, maxScale, deskZoom)
+```
+
+Zoom **hücreye değil TAVANA** uygulanıyor. Sebep tek cümle: tavana uygulanınca tabana dönüşemez.
+`cell = min(capCell, cellSizeThatFits(active))` olduğu için fit hesabı **her zaman son sözü söyler**
+→ hiçbir zoom değerinde scroll doğmaz, hiçbir ikon ekran dışına itilmez.
+
+| aralık | 0.40 – 2.50, adım 0.05, varsayılan 1.00 |
+|---|---|
+| aşağı | hücreler küçülür, **daha çok boş grid görünür** (yerleştirme alanı artar) |
+| yukarı | hücreler büyür — **aktif alan sığmayı sınırlayana kadar** |
+
+**Ölçülen tepki eğrisi** (1600×900):
+
+| masa | zoom 0.4 | 0.8 | 1.0 | 1.5 | 2.0 | 2.5 |
+|---|---|---|---|---|---|---|
+| seyrek (erişim 3×10) | 31px | 62px | 78px | 116px | 138px | 138px |
+| dolu (erişim 11×21) | 31px | 62px | 65px | 65px | 65px | 65px |
+
+> **Dolu masada slider'ın üst yarısı etkisizdir ve bu bir bug DEĞİLDİR** — ikonlar zaten ekranı
+> kaplıyorsa büyüyecek yer yoktur. Ama sessiz kalması kontrolü bozuk gösterir, o yüzden arayüz
+> bunu **yazıyor**: canlı hücre px'i + *"held down to fit your furthest icon — zooming in further
+> won't enlarge it"*. Okuma canlı masadan ölçülüyor (ayarlar masanın üstünde modal açılıyor);
+> bağımsız options sayfasında masa yokken tavanı gösteriyor.
+
+`nt-zoom.mjs` — **7/7**: küçülme grid'i açıyor · **hiçbir ikon kıpırdamıyor** (iki yönde de) ·
+büyüme çalışıyor · tam yakınlaştırmada uzak köşe iddiası hâlâ ekranda · **aralığın hiçbir
+noktasında scroll/kırpma yok**. Birim testte 8 test: tavanı ölçekler · Infinity'yi bozmaz ·
+saçma değeri yutar · taban getirmez · konum değiştirmez.
+
+### 3. "Base Screen" ölü müydü? — HAYIR, ama METNİ ölüydü
+
+4 adımlı kanıt: `basePage` → `pageSize()` → `activeCols = active.cols || page.cols`.
+Yani **yalnızca BOŞ masanın** başlangıç aktif alanını belirliyor. Referanslı, kanonik, çalışıyor
+→ **korundu**. Ölü olan arayüz metniydi: hâlâ emekli sayfa modelini anlatıyordu
+("*a wider monitor gets whole extra pages of desk beside and below it*") — bu davranış aylar önce
+terk edilmişti. Başlık `Starting Desk Size` oldu, açıklama gerçekte yaptığı işi anlatıyor.
+
+**Gerçekten ölü olan kaldırıldı:** `CanvasPlan.pagesX` / `pagesY` — üretiliyordu, **hiçbir yerde
+tüketilmiyordu**. Emekli sayfa modelinin son kalıntısı. Aynı sayfa dilinin sızdığı 7 yorum/metin
+de gerçeğe uyduruldu.
+
+```
+86 test PASS (78 -> +8) · build yeşil · tsc 34 = baseline
+prob seti: page-probe PASS · drag 0/23 · release PASS · backup 8/8 · roundtrip 8/8 · zoom 7/7
+```

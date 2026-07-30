@@ -33,7 +33,12 @@ export const GAP_RATIO = 0.14;
 
 export const BASE_FONT_SIZE = 16;
 
-/** Reference screen that defines one page: a 24" monitor, in CSS pixels. */
+/**
+ * Reference screen an EMPTY desk starts at: a 24" monitor, in CSS pixels.
+ *
+ * Once icons are placed, their reach is what sizes the desk and this stops
+ * having any effect. It is the seed, not the model.
+ */
 export const BASE_PAGE = { width: 1920, height: 1080 };
 
 /** Padding between the desk and the window edge, in px. */
@@ -54,6 +59,18 @@ export const DIAL_SIZE_EM: Record<string, number> = {
  * cap can't tell us how many cells make up a page.
  */
 export const CAPTURE_FALLBACK_EM = 1.6;
+
+/**
+ * Bounds for the desk zoom — the continuous multiplier on the dial-size
+ * ceiling.
+ *
+ * It is a ceiling, not a size: turning it up lets cells grow until the active
+ * area is what limits them, turning it down shrinks them and brings more empty
+ * grid into view. Neither direction can push anything off screen, because the
+ * fit calculation still has the last word.
+ */
+export const DESK_ZOOM_MIN = 0.4;
+export const DESK_ZOOM_MAX = 2.5;
 
 export type DeskAnchor = "center" | "top-left";
 
@@ -80,12 +97,23 @@ export function maxCellSize(
   squareDials: boolean,
   limitScale: boolean,
   maxScale: number,
+  /**
+   * Desk zoom. Applied here, to the ceiling, rather than to the resolved cell:
+   * that is what keeps it from becoming a floor. Turn it up and cells grow only
+   * as far as the active area still fits; turn it down and they shrink, which
+   * brings more empty grid into view without moving a single icon.
+   * An unlimited cap stays unlimited — Infinity has nothing to scale.
+   */
+  zoom = 1,
 ) {
   const width = dialWidthValue(squareDials);
+  const factor = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   if (dialSize === "scale") {
-    return limitScale ? width * maxScale * BASE_FONT_SIZE : Infinity;
+    return limitScale ? width * maxScale * BASE_FONT_SIZE * factor : Infinity;
   }
-  return width * (DIAL_SIZE_EM[dialSize] ?? DIAL_SIZE_EM.tiny) * BASE_FONT_SIZE;
+  return (
+    width * (DIAL_SIZE_EM[dialSize] ?? DIAL_SIZE_EM.tiny) * BASE_FONT_SIZE * factor
+  );
 }
 
 /** A cap of Infinity can't size a page; fall back to the classic 1.6em ceiling. */
@@ -163,9 +191,6 @@ export interface CanvasPlan {
   /** Rendered cell size in px, and the transform that produces it. */
   cell: number;
   scale: number;
-  /** How many base pages' worth of desk this is, for display purposes. */
-  pagesX: number;
-  pagesY: number;
   /** True while the cap is what limits the cell size, rather than the screen. */
   atCapSize: boolean;
 }
@@ -183,7 +208,7 @@ export interface ResolveCanvasOptions {
   logicalCell: number;
   /** Maximum cell size from the dial-size setting; may be Infinity. */
   capCell: number;
-  /** Reference screen defining one page. */
+  /** Reference screen an empty desk starts at; ignored once icons exist. */
   base?: { width: number; height: number };
   /** Explicit canvas set by the user; bypasses the page/crop logic entirely. */
   fixed?: { cols: number; rows: number } | null;
@@ -261,8 +286,6 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
     rows,
     cell,
     scale,
-    pagesX: page.cols > 0 ? cols / page.cols : 1,
-    pagesY: page.rows > 0 ? rows / page.rows : 1,
     atCapSize: Number.isFinite(capCell) && cell >= capCell - 1e-6,
   };
 }

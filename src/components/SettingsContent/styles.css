@@ -375,3 +375,44 @@
     color: #90caf9;
   }
 }
+
+/* Desk Zoom — a continuous multiplier on the dial-size ceiling. Shares the
+   slider look with Maximum Scale Limit, adds a readout because the control has
+   a range in which it deliberately stops having a visible effect. */
+.desk-zoom-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.desk-zoom-row {
+  display: flex;
+  align-items: center;
+}
+
+.desk-zoom-slider {
+  width: 180px;
+}
+
+.desk-zoom-readout {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 0.8125rem;
+  opacity: 0.75;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.desk-zoom-note {
+  max-width: 240px;
+  opacity: 0.85;
+  font-style: italic;
+}
+
+.desk-zoom-reset {
+  padding: 4px 10px;
+  font-size: 0.8125rem;
+}

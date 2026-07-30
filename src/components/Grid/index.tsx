@@ -256,8 +256,6 @@ export const Grid = observer(function Grid() {
     rows: 6,
     cell: 80,
     scale: 1,
-    pagesX: 1,
-    pagesY: 1,
     atCapSize: false,
   }));
 
@@ -402,6 +400,7 @@ export const Grid = observer(function Grid() {
         settings.squareDials as boolean,
         settings.limitDialScale as boolean,
         settings.maxDialScale as number,
+        settings.deskZoom as number,
       ),
       base: {
         width: settings.basePageWidth as number,
@@ -428,6 +427,7 @@ export const Grid = observer(function Grid() {
     panelBookmarks,
     settings.basePageHeight,
     settings.basePageWidth,
+    settings.deskZoom,
     settings.dialSize,
     settings.gridCols,
     settings.gridLayout,
