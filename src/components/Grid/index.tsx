@@ -23,6 +23,12 @@ import {
   normalizeFullScreenCoords,
   resolveCanvas,
 } from "./layout";
+import {
+  latestSnapshot,
+  pruneLegacyBackups,
+  quarantine,
+  recordSnapshot,
+} from "./positionStore";
 
 type PanelName = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "bottom-full" | "full-screen-panel";
 
@@ -58,6 +64,12 @@ function savePanelBookmarks(panelBookmarks: any[]): boolean {
       console.error('Save verification failed!');
       return false;
     }
+
+    // Snapshot rides on the save rather than on any one caller, so no future
+    // write path can forget it. It is deliberately after the verification: a
+    // save that did not land must not be remembered as one that did. The store
+    // throttles itself, so a burst of drags costs one snapshot, not dozens.
+    recordSnapshot(localStorage, panelBookmarks, { reason: "layout-change" });
     return true;
   } catch (e) {
     console.error('Failed to save panel bookmarks:', e);
@@ -97,13 +109,39 @@ function loadPanelBookmarks(): any[] {
     return [];
   } catch (e) {
     console.error('Failed to load panel bookmarks:', e);
-    
-    // Try to recover corrupted data
+
+    // The arrangement is unreadable. It used to be deleted here, which turned a
+    // parse error into permanent data loss with no way back. Move it aside
+    // instead, then fall back to the newest snapshot: the user gets their desk
+    // as it was minutes ago rather than an empty one.
     try {
+      const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
+      if (raw) quarantine(localStorage, raw);
       localStorage.removeItem(PANEL_BOOKMARKS_KEY);
-      console.warn('Removed corrupted data from localStorage');
+      console.warn('Quarantined unreadable panel bookmarks');
     } catch {}
-    
+
+    try {
+      const snapshot = latestSnapshot(localStorage);
+      if (snapshot && Array.isArray(snapshot.data) && snapshot.data.length > 0) {
+        const recovered = normalizeFullScreenCoords(snapshot.data as any[]);
+        // Write it back before returning. This function is called from more
+        // than one place during start-up, and the quarantine above left the key
+        // empty — without this the second caller sees no arrangement at all and
+        // rebuilds the desk from scratch, quietly undoing the recovery.
+        try {
+          localStorage.setItem(PANEL_BOOKMARKS_KEY, JSON.stringify(recovered));
+        } catch {}
+        console.warn(
+          'Recovered', recovered.length,
+          'bookmarks from the snapshot taken at', new Date(snapshot.at).toISOString(),
+        );
+        return recovered;
+      }
+    } catch (recoveryError) {
+      console.error('Snapshot recovery failed:', recoveryError);
+    }
+
     return [];
   }
 }
@@ -638,26 +676,42 @@ export const Grid = observer(function Grid() {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Periodic backup
+  // Retire the dated backup keys the old build wrote. They were never read by
+  // anything and never pruned, so on a long-lived profile they were pure
+  // ballast; the newest one is folded into the history on the way out.
   useEffect(() => {
-    const backupInterval = setInterval(() => {
-      if (isRootSafe && panelBookmarks.length > 0) {
-        try {
-          const backup = {
-            timestamp: Date.now(),
-            data: panelBookmarks
-          };
-          localStorage.setItem(PANEL_BOOKMARKS_KEY + '_backup_' + new Date().toISOString().split('T')[0], 
-                             JSON.stringify(backup));
-          console.log('Daily backup created');
-        } catch (e) {
-          console.error('Backup creation failed:', e);
-        }
-      }
-    }, 24 * 60 * 60 * 1000); // 24 saat
+    const { removed, adopted } = pruneLegacyBackups(localStorage);
+    if (removed.length > 0) {
+      console.log(
+        `Retired ${removed.length} legacy backup key(s)` +
+        (adopted > 0 ? `, adopting ${adopted} bookmarks into the history` : ''),
+      );
+    }
+  }, []);
 
-    return () => clearInterval(backupInterval);
+  // A snapshot on the way out.
+  //
+  // This replaces a 24-hour setInterval that could not fire: its effect
+  // depended on panelBookmarks, so every single drag restarted the clock. A
+  // new-tab page is closed in seconds, not days — the moment that actually
+  // matters is the page going away, which is what visibilitychange catches
+  // (pagehide covers the browsers that skip it on teardown).
+  const snapshotOnExit = useCallback(() => {
+    if (!isRootSafe || panelBookmarks.length === 0) return;
+    recordSnapshot(localStorage, panelBookmarks, { reason: "page-hidden", force: true });
   }, [isRootSafe, panelBookmarks]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") snapshotOnExit();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", snapshotOnExit);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", snapshotOnExit);
+    };
+  }, [snapshotOnExit]);
 
   // Global API for panel bookmark management
   useEffect(() => {

@@ -5,6 +5,7 @@ import semverGt from "semver/functions/gt";
 import browser from "webextension-polyfill";
 
 import { mockBookmarks } from "#stores/useBookmarks/mockBookmarks";
+import { recordSnapshot } from "#components/Grid/positionStore";
 
 // ==================================================================
 // SETUP
@@ -73,23 +74,34 @@ bc.onmessage = (e) => {
 // PANEL BOOKMARKS HELPER FUNCTIONS
 // ==================================================================
 
+/**
+ * Normalises one entry for the backup file.
+ *
+ * `index` used to be stamped onto every entry, defaulting to 0. On the
+ * full-screen desk that is a lie — position there is (row, col) — and it left
+ * the file claiming that every icon sat in slot 0. It is now written only where
+ * it means something: entries that carry no coordinates.
+ */
+function validateForBackup(item: any) {
+  const hasCoords = typeof item?.row === 'number' && typeof item?.col === 'number';
+  const validated: any = {
+    ...item,
+    panel: item?.panel || 'top-left',
+    isPanelBookmark: true,
+  };
+  if (!hasCoords) {
+    validated.index = typeof item?.index === 'number' ? item.index : 0;
+  }
+  return validated;
+}
+
 function getPanelBookmarksData() {
   try {
     const panelBookmarkManager = (window as any).panelBookmarkManager;
     if (panelBookmarkManager && typeof panelBookmarkManager.exportPanelBookmarks === 'function') {
       const data = panelBookmarkManager.exportPanelBookmarks();
-      console.log('Exporting panel bookmarks data:', data?.length || 0, 'items');
-      
-      // Validate data structure
       if (Array.isArray(data)) {
-        const validatedData = data.map(item => ({
-          ...item,
-          // Ensure all required fields are present
-          panel: item.panel || 'top-left',
-          index: typeof item.index === 'number' ? item.index : 0,
-          isPanelBookmark: true,
-        }));
-        
+        const validatedData = data.map(validateForBackup);
         console.log('Validated panel bookmarks for backup:', validatedData.length, 'items');
         return validatedData;
       }
@@ -97,28 +109,22 @@ function getPanelBookmarksData() {
   } catch (error) {
     console.warn('Failed to get panel bookmarks data:', error);
   }
-  
-  // Fallback: try to get from localStorage directly
+
+  // Fallback: the live arrangement, read straight from storage. Reached when
+  // the backup is triggered from a surface that never mounted the grid.
   try {
     const raw = localStorage.getItem('panel-bookmarks');
     if (raw) {
       const parsed = JSON.parse(raw);
-      console.log('Fallback: got panel bookmarks from localStorage:', parsed?.length || 0, 'items');
-      
       if (Array.isArray(parsed)) {
-        const validatedData = parsed.map(item => ({
-          ...item,
-          panel: item.panel || 'top-left',
-          index: typeof item.index === 'number' ? item.index : 0,
-          isPanelBookmark: true,
-        }));
-        return validatedData;
+        console.log('Fallback: got panel bookmarks from localStorage:', parsed.length, 'items');
+        return parsed.map(validateForBackup);
       }
     }
   } catch (error) {
     console.warn('Failed to get panel bookmarks from localStorage:', error);
   }
-  
+
   return [];
 }
 
@@ -129,20 +135,38 @@ function setPanelBookmarksData(data: any[]) {
       return false;
     }
     
-    // Validate and clean data before importing
+    // Validate and clean data before importing.
+    //
+    // The full-screen desk is positioned by (row, col); `index` is the older
+    // flat ordering that only the panel layouts still use. Insisting on a
+    // numeric `index` here dropped every coordinate-only entry on the floor —
+    // silently, since the filter reports nothing. Either form of position is
+    // accepted, and whichever one the entry carries is preserved.
     const cleanedData = data.filter(item => {
-      return item && 
-             typeof item === 'object' && 
-             item.id && 
-             item.panel && 
-             typeof item.index === 'number';
-    }).map(item => ({
-      ...item,
-      isPanelBookmark: true,
-      // Ensure proper data types
-      index: parseInt(item.index) || 0,
-      panel: String(item.panel),
-    }));
+      if (!item || typeof item !== 'object' || !item.id || !item.panel) return false;
+      const hasIndex = typeof item.index === 'number' && Number.isFinite(item.index);
+      const hasCoords = typeof item.row === 'number' && typeof item.col === 'number';
+      return hasIndex || hasCoords;
+    }).map(item => {
+      const cleaned: any = {
+        ...item,
+        isPanelBookmark: true,
+        panel: String(item.panel),
+      };
+      if (typeof item.index === 'number' && Number.isFinite(item.index)) {
+        cleaned.index = Math.trunc(item.index);
+      }
+      if (typeof item.row === 'number' && typeof item.col === 'number') {
+        cleaned.row = Math.max(0, Math.trunc(item.row));
+        cleaned.col = Math.max(0, Math.trunc(item.col));
+      }
+      return cleaned;
+    });
+
+    const dropped = data.length - cleanedData.length;
+    if (dropped > 0) {
+      console.warn(`Skipped ${dropped} bookmark(s) with no usable position`);
+    }
     
     console.log('Cleaned panel bookmarks data:', cleanedData.length, 'items from', data.length, 'original items');
     
@@ -677,7 +701,14 @@ export const settings = makeAutoObservable({
                 
                 for (const bookmark of backup.panelBookmarks) {
                   try {
-                    if (bookmark.type === 'bookmark' && bookmark.url) {
+                    // `type` was not always written. Falling back to the shape
+                    // of the entry keeps older files restorable: anything with
+                    // a url is a bookmark, and anything else still reaches the
+                    // layout pass below rather than vanishing.
+                    const kind = bookmark.type
+                      ?? (bookmark.url ? 'bookmark' : bookmark.children ? 'folder' : 'unknown');
+
+                    if (kind === 'bookmark' && bookmark.url) {
                       const existingBookmarks = await browser.bookmarks.search({ url: bookmark.url });
                       const isDuplicate = existingBookmarks.some(bm => 
                         bm.title === (bookmark.title || bookmark.name) && 
@@ -709,17 +740,22 @@ export const settings = makeAutoObservable({
                           });
                         }
                       }
-                    } else if (bookmark.type === 'folder') {
+                    } else if (kind === 'folder') {
                       const created = await browser.bookmarks.create({
                         parentId: bookmarksBarId,
                         title: bookmark.title || bookmark.name || 'Untitled Folder'
                       });
-                      
+
                       createdBookmarks.push({
                         ...bookmark,
                         id: created.id
                       });
                       successCount++;
+                    } else {
+                      // No browser bookmark to recreate, but the entry still
+                      // holds a position. Dropping it here is how backups used
+                      // to come back with holes in them.
+                      createdBookmarks.push(bookmark);
                     }
                   } catch (error) {
                     console.warn('Failed to create bookmark:', bookmark.title || bookmark.name, error);
@@ -729,8 +765,22 @@ export const settings = makeAutoObservable({
                 
                 console.log(`Successfully created ${successCount} bookmarks directly in Bookmarks Bar`);
                 
+                // Restoring overwrites whatever the user has arranged since.
+                // Snapshot it first so a restore of the wrong file is not a
+                // one-way door.
+                try {
+                  const current = JSON.parse(localStorage.getItem('panel-bookmarks') || '[]');
+                  if (Array.isArray(current) && current.length > 0) {
+                    recordSnapshot(localStorage, current, {
+                      reason: 'before-restore',
+                      force: true,
+                    });
+                  }
+                } catch {}
+
                 localStorage.removeItem('panel-bookmarks');
-                
+
+
                 const attemptRestore = (attempt: number) => {
                   setTimeout(() => {
                     const success = setPanelBookmarksData(createdBookmarks);
@@ -834,21 +884,19 @@ export const settings = makeAutoObservable({
     // Get panel bookmarks data with additional metadata
     const panelBookmarks = getPanelBookmarksData();
     
-    // Get current grid dimensions for full-screen layout
-    const gridDimensions = { cols: 10, rows: 6 }; // Default values
-    try {
-      const gridElement = document.querySelector('[data-panel="full-screen-panel"]');
-      if (gridElement) {
-        const computedStyle = getComputedStyle(gridElement);
-        const gridCols = computedStyle.gridTemplateColumns?.split(' ').length || 10;
-        const gridRows = computedStyle.gridTemplateRows?.split(' ').length || 6;
-        gridDimensions.cols = gridCols;
-        gridDimensions.rows = gridRows;
-      }
-    } catch (e) {
-      console.log('Could not get grid dimensions, using defaults');
-    }
-    
+    // The canvas is defined by settings, not by the shape the window happens to
+    // have while the backup is being written. This used to measure the live
+    // grid, which made the file depend on the monitor it was taken on: restore
+    // the same backup on a laptop and the recorded dimensions were different.
+    // Positions themselves are (row, col) and carry no such dependency; this
+    // field only survives as a migration hint for pre-(row, col) backups, so it
+    // is written when the user has pinned a fixed canvas and omitted otherwise.
+    const gridDimensions =
+      settings.gridCols > 0 && settings.gridRows > 0
+        ? { cols: settings.gridCols, rows: settings.gridRows }
+        : null;
+
+
     const backup = {
       // Basic settings
       attachTitle: settings.attachTitle,

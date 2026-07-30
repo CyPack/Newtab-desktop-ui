@@ -515,3 +515,86 @@ gösterge yol boyunca takip etti, bırakma hedefe indi, konsol temiz.
 > (`mouse.move(x+12, y+12)`) şart — doğrudan hedefe atlarsan `dragstart` HİÇ tetiklenmez ve
 > gösterge "hiç çıkmıyor" sanılır. Ayrıca sürükleme ortasında `page.screenshot()` almak
 > native drag'i kesiyor (gösterge donmuş görünür). İkisi de teşhiste yanlış iz sürdürdü.
+
+---
+
+## Kalıcılık ve yedek katmanı (2026-07-30)
+
+Buraya kadarki her şey **yerleşimin nasıl çizildiğiyle** ilgiliydi. Bu bölüm **nasıl saklandığıyla**
+ilgili. Yerleşim mimarisi oturduktan sonra ortaya çıkan soru şuydu: pozisyonlar kaydediliyor mu,
+ve kaybolursa geri gelir mi? Birincinin cevabı baştan beri evetti; ikincininki **hayırdı**.
+
+### Devralınan durum — ne vardı, ne yoktu
+
+| vardı | yer |
+|---|---|
+| `(row,col)` → localStorage `panel-bookmarks` | `Grid/index.tsx` `savePanelBookmarks` |
+| 300 ms debounce + **yazma doğrulaması** (geri okuyup karşılaştırma) | `debouncedSavePanelBookmarks` |
+| Kota hatasında sessionStorage'a düşme | `savePanelBookmarks` catch |
+| Yüklemede origin'e re-base | `loadPanelBookmarks` |
+
+Yani **pozisyon kayıt sistemi vardı ve çalışıyordu.** Altındaki ağ yoktu.
+
+### Beş kusur — hepsi koddan kanıtlandı
+
+| # | kusur | neden ölümcül |
+|---|---|---|
+| B1 | 24 saatlik yedek `setInterval`'ı **hiç ateşlenemez**: effect bağımlılığı `[isRootSafe, panelBookmarks]`, her sürükleme sayacı sıfırlıyor | tek "yedek" mekanizması ölü kod |
+| B2 | Yazdığı `panel-bookmarks_backup_<tarih>` anahtarlarını **okuyan kod yok**, budayan da yok | sadece kota tüketiyor; geri dönüş yolu yok |
+| B3 | `loadPanelBookmarks` parse hatasında **tek kopyayı siliyordu** (`removeItem`) | parse hatası → kalıcı veri kaybı |
+| B4 | Yedeğe yazılan `gridDimensions` **canlı DOM'dan** ölçülüyordu | yedek, alındığı monitöre bağımlı → I8 ihlali |
+| B5 | Geri yükleme filtresi `typeof index === 'number'` **ve** `type` alanı şart koşuyordu | koordinat-taşıyan girdiler **sessizce** düşüyordu |
+
+### Kurulan model
+
+```
+panel-bookmarks            → TEK GERÇEK. Değişmedi, değiştirilmedi.
+panel-bookmarks-history    → sınırlı halka tampon (10 snapshot / 512 KB)
+panel-bookmarks-corrupt    → karantina: okunamayan yük SİLİNMEZ, kenara alınır
+```
+
+`positionStore.ts` — üç kural üzerine kurulu:
+
+1. **BEST EFFORT.** Snapshot, asıl kayıt **başarılı olduktan sonra** alınır ve içindeki her hata
+   yutulur. Snapshot kaybetmek can sıkıcıdır; snapshot yüzünden kaydı kaybetmek, önlemeye
+   çalıştığı bug'ın ta kendisidir.
+2. **SINIRLI.** Hem adet hem serileşmiş bayt cinsinden. Kota dolarsa en eskiden başlayarak döker,
+   pes etmez. Eski tarihli anahtarların sınırsız büyümesi tekrarlanmaz.
+3. **KARANTİNA, SİLME DEĞİL.** Bozuk yük incelenebilsin diye saklanır; yerini en yeni snapshot alır.
+
+**Snapshot ne zaman alınır:** kaydın kendisine bağlı (`savePanelBookmarks` içinde), tek bir
+çağıranın içinde değil — böylece gelecekteki hiçbir yazma yolu unutamaz. Rutin değişiklikler
+5 dakikalık pencerede kısılır; **sayfa gizlenince** (`visibilitychange` + `pagehide`) kısıtsız
+bir snapshot zorlanır. Ölü 24 saatlik interval'in yerini bu aldı: new-tab sayfası günlerce değil
+saniyelerce açık kalır, önemli olan an sayfanın **gitmesidir**.
+
+> **Geri yüklemede de snapshot:** yanlış dosyayı restore etmek artık tek yönlü kapı değil —
+> `restoreFromJSON` üzerine yazmadan önce mevcut dizilimi `before-restore` etiketiyle kaydeder.
+
+### Ölçümde çıkan gerçek kusur — kurtarılan veri geri yazılmıyordu
+
+Prob C0 "(9,9) snapshot'ta" derken C2 "(0,0) geri geldi" diyordu. Prob artefaktı sanıldı, değildi:
+`loadPanelBookmarks` **başlangıçta birden fazla kez** çağrılıyor. İlk çağrı karantina yapıp
+anahtarı siliyor ve snapshot'tan kurtarıyordu — ama kurtardığını **geri yazmıyordu**. İkinci çağrı
+boş anahtarı görüp masayı sıfırdan kuruyor ve kurtarmayı sessizce geri alıyordu.
+Düzeltme: kurtarılan dizilim döndürülmeden önce `panel-bookmarks`'a yazılır.
+
+> **Ders:** "kurtardım" demek yetmiyor — kurtarmanın **kalıcı ve idempotent** olması gerekiyor.
+> Tek okuyucu varsayımı, birden fazla okuyucusu olan bir başlangıç akışında sessiz veri kaybı üretir.
+
+### Doğrulama
+
+`probes-newtab-desktop-ui/nt-backup.mjs` — gerçek sayfada 8 kontrol:
+A1 eski anahtarlar emekli · A2 en yenisi geçmişe devralındı · B1 pencere içi değişiklik kısılıyor ·
+B2 sayfa gizlenince zorlanıyor · C0 işaret geçmişe ulaştı · C1 karantina · C2 **işaretli pozisyon
+bozulmayı atlattı** · D1 geçmiş sınırlı.
+
+```
+8/8 checks passed
+78 test PASS (58 → +20) · build yeşil · tsc 34 = baseline
+I1 dizilim sabitliği PASS · I2 sürükleme izolasyonu 0/23 · I6 serbest bırakma PASS
+```
+
+> ⚠️ **`ntdui-page-probe.mjs` içindeki "whole-page rounding" kriteri EMEKLİ** — puanlanmıyor,
+> yalnız raporlanıyor. Sayfa yuvarlaması bilerek terk edildi (aşağı yuvarlama ölü bölge
+> bırakıyordu). Bu satırın `false` olması **doğru davranıştır**; verdict'i düşürmemeli.
