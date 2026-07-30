@@ -683,3 +683,122 @@ de gerçeğe uyduruldu.
 86 test PASS (78 -> +8) · build yeşil · tsc 34 = baseline
 prob seti: page-probe PASS · drag 0/23 · release PASS · backup 8/8 · roundtrip 8/8 · zoom 7/7
 ```
+
+---
+
+## Masa profilleri — boyutu doğru kapsama taşımak (2026-07-30, üçüncü tur)
+
+Kullanıcı canlı zoom slider'ına itiraz etti: *"ikonların size değişkenliği grid yapısının en-boy
+box sayısını da etkiliyor; zoom arttırılırsa en dıştaki ikonlar ekrandan taşacak, değil mi?
+Ya da bu olayı hiç koymasak mı?"*
+
+Ölçüm itirazı **ikiye ayırdı** — ve asıl mesele tahmin edilenden farklı çıktı.
+
+### Taşma korkusu gerçekleşmiyor
+
+Erişim 15×27, pencere 1600×900, **görsel** kutu (transform sonrası) ölçümü:
+
+| zoom | masa kutusu | alan | **ekran dışı ikon** | scroll |
+|---|---|---|---|---|
+| 0.4× | 1553×774 | 1600×842 | **0 / 26** | yok |
+| 1.0× – 2.5× | 1557×802 | 1600×842 | **0 / 26** | yok |
+
+Yapısal sebep: `cell = min(capCell, cellSizeThatFits(aktifAlan))`. Zoom yalnız tavanı büyütür,
+sığma hesabı son sözü söyler.
+
+> ⚠️ Bu ölçüm ilk denemede **yanlıştı.** `getBoundingClientRect()` transform'lu elemanda zaten
+> görsel kutuyu döndürür; prob bir kez daha `scale` ile çarpıyordu → taşma testi her koşulda
+> geçiyordu. Düzeltildi ve `nt-zoom.mjs` artık kutu ölçmek yerine **ikon ikon** ekran dışı
+> sayıyor — ölçüm biçiminden bağımsız, daha güçlü kontrol.
+
+### Asıl kusur: adreslenebilir alan zoom'a bağlıydı
+
+Seyrek masa (erişim 3×10), 1600×900:
+
+| zoom | grid | hücre | **yerleştirilebilir hücre** |
+|---|---|---|---|
+| 0.4× | 44×24 | 31px | **1056** |
+| 1.0× | 17×9 | 78px | **153** |
+| 2.5× | 10×5 | 138px | **50** |
+
+**21 kat.** Kullanıcı zoom'u arttırdıkça 34 kolon × 19 satır territory erişilemez oluyordu.
+Üstelik erişim genişse slider'ın üst yarısı hiçbir şey yapmıyordu.
+
+Teşhis: `deskZoom` ile territory expansion **aynı değişkeni** (hücre boyutu) kontrol ediyordu ve
+territory her zaman kazanıyordu. Ekran alanı sonlu (`cols × cell ≤ availWidth`) olduğu için
+`cols` ve `cell` ters bağlıdır; bir tasarım kullanıcının **hangisini** kontrol ettiğini seçmek
+zorundadır. O tasarım seçmiyordu.
+
+### Karar: boyut, canlı bir değişken değil bir CİHAZ BAĞLAMININ özelliği
+
+`deskZoom` **emekli edildi**. Yerine `DeskProfile { id, name, cellSize, positions }`.
+Kullanıcının kendi önerisi; platform emsaliyle de uyumlu (macOS ikon konumlarını ekran
+yapılandırması başına saklar, iOS/Android ızgarayı cihaz sınıfından türetir). Dizilimi bir
+**bağlama** bağlamayan sistemler onu bozar ve kullanıcılar şikâyet eder.
+
+> **Prior-art dürüstlüğü:** `~/.cartography/refpool` (816 repo) bu alanda **boş** çıktı — havuz
+> Rust/TUI ağırlıklı. Yukarıdaki emsal havuzdan değil, platform davranışından geliyor.
+
+### Yerleşim — 28 yazma yoluna dokunmadan
+
+`panelBookmarks`'a yazan **28 yol** var. Hepsi tek dikişten geçiyor: `savePanelBookmarks` /
+`loadPanelBookmarks` — snapshot katmanının da bağlı olduğu, kanıtlanmış dikiş.
+
+```
+28 yazma yolu ─> savePanelBookmarks ─> localStorage + snapshot + profiles.syncActive
+başlangıç ────> loadPanelBookmarks ─> panel-bookmarks oku + profiles.project
+profil değiştir ─> ÖNCE mevcut masayı ÇIKAN profile yakala, SONRA aktifliği taşı
+```
+
+`panel-bookmarks` aktif profilin yansıması olarak kalır → snapshot/kurtarma/yedek zinciri
+değişmeden çalışır.
+
+### Canlı probların yakaladığı, birim testlerin göremediği beş kusur
+
+| # | kusur | neden birim test göremezdi |
+|---|---|---|
+| 1 | Okuma ekranı hücre boyutuna bölüyordu → "8 × 4" derken masa 17 × 9'daydı | Doğru cevap yalnız boş masa için; dolu masada `resolveCanvas` gerekiyor |
+| 2 | Yeni profil çıkan dizilimi devralıyordu → ekranı kaplayarak boyutu kilitliyordu | `project`'in "görülmemiş yer imini aynen geçir" kuralı doğru, ama yeni profil için yanlış sonuç veriyor |
+| 3 | Yüksek-su işareti profil sınırını geçiyordu → masa eski profilin ölçüsünde takılıyordu | Ref davranışı, saf fonksiyonda yok |
+| 4 | Yeniden-adlandırmada **Escape tüm ayarlar panelini kapatıyordu** | DOM olay yayılımı |
+| 5 | **Göç, dizilim okunmadan tetikleniyordu** → ilk profil 0 ikonla doğuyordu | `activeDeskCellSize()` ilk render'da çağrılıyor, `loadPanelBookmarks` efektinden ÖNCE. Çağrı sırası. |
+
+> **5 numaralı ders:** tembel başlatma, "beni ilk kim çağırırsa doğru bağlamı taşır" varsayımına
+> dayanamaz. Göç artık tohumunu **diskten** okuyor — React state'i henüz dolmamış olabilir, disk
+> olamaz.
+
+### Akış — ölçülmüş
+
+| adım | canlı masa | okuma |
+|---|---|---|
+| yeni profil | **78px**, 17×9 | `Desk: 17 × 9 cells` |
+| 160px iste, tidy YOK | 81px | `17 × 8 cells at 81px` + *"tidy them into a block"* |
+| **Tidy** | **160px**, 8×4 | `Desk: 8 × 4 cells` |
+
+Okuma her adımda canlı masayla **birebir** — çünkü masanın kullandığı `resolveCanvas`'ı
+kullanıyor. Tidy **açık bir eylemdir**, boyut değişince otomatik çalışmaz: ikonları kullanıcının
+arkasından yeniden akıtmak, bu mimarinin ortadan kaldırmak için var olduğu reflow'un ta kendisidir.
+
+### PRD'nin ana iddiası — kanıt
+
+`nt-profiles.mjs` TP-B4, aralarda **yeniden yükleyerek** (yüksek-su serbest, tek açıklayıcı
+profilin kendisi):
+
+```
+5-genişlik blok  -> 17x9 @ 78px
+3-genişlik blok  -> 17x9 @ 78px
+bir ikon (8,12)  -> 17x9 @ 78px
+6-genişlik blok  -> 17x9 @ 78px
+```
+
+Dört tamamen farklı dizilim, **tek bir hücre boyutu**. Zoom döneminde aynı ölçüm
+1056 → 153 → 50 hücre oynuyordu.
+
+```
+115 birim test PASS (86 -> +29) · build ✓ · tsc 34 = baseline
+page PASS · drag 0/23 · release PASS · backup 8/8 · roundtrip 8/8 · profiles 13/13
+```
+
+**KAPSAM DIŞI (bilinçli):** ekran ölçüsüne göre otomatik profil değişimi · profil dosyası
+dışa/içe aktarma · profil başına duvar kağıdı. `screenHint` saklanıyor ama **hiçbir şeyi
+tetiklemiyor** — yanlış tahmin masayı yeniden düzenler, bu da özelliğin sözünü bozar.

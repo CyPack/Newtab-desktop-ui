@@ -83,13 +83,32 @@ function currentCeiling(): number {
     : referenceCellSize(cap, settings.squareDials as boolean);
 }
 
-/** Lazily materialised so the very first read of the arrangement is what seeds
- *  the migration — there is no earlier moment at which the desk is known. */
+/** The arrangement as it sits on disk, for seeding the migration.
+ *
+ *  Read here rather than taken from the caller because the first thing to reach
+ *  for the profile store is not necessarily the load path: the component asks
+ *  for the active cell size during its first render, which is BEFORE the effect
+ *  that loads the desk. Seeded from the caller alone, that ordering produced a
+ *  first profile with no icons in it — the migration ran against a React state
+ *  that had not been filled yet. Disk does not have that problem. */
+function storedArrangement(): any[] {
+  try {
+    const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Lazily materialised, and safe to reach for at any point in start-up. */
 function profiles(seed?: any[]): ProfileStore {
   if (!profileStore) {
+    const arrangement =
+      Array.isArray(seed) && seed.length > 0 ? seed : storedArrangement();
     profileStore = ensureStore(localStorage, {
       defaultCellSize: currentCeiling(),
-      arrangement: seed,
+      arrangement,
       screenHint: { width: window.innerWidth, height: window.innerHeight },
     }).store;
   }

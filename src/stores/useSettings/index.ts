@@ -6,6 +6,11 @@ import browser from "webextension-polyfill";
 
 import { mockBookmarks } from "#stores/useBookmarks/mockBookmarks";
 import { recordSnapshot } from "#components/Grid/positionStore";
+import {
+  PROFILES_KEY,
+  readStore as readProfileStore,
+  writeStore as writeProfileStore,
+} from "#components/Grid/deskProfiles";
 
 // ==================================================================
 // SETUP
@@ -547,6 +552,11 @@ export const settings = makeAutoObservable({
       defaultSettings.basePageHeight,
     );
     settings.handleDeskAnchor(defaultSettings.deskAnchor);
+    // Cleared rather than rebuilt: the migration recreates a single profile
+    // from whatever is on the desk the next time it is read.
+    try {
+      localStorage.removeItem(PROFILES_KEY);
+    } catch {}
     settings.handleMaxColumns(defaultSettings.maxColumns);
     settings.handleLimitDialScale(defaultSettings.limitDialScale);
     settings.handleMaxDialScale(defaultSettings.maxDialScale);
@@ -635,6 +645,15 @@ export const settings = makeAutoObservable({
           }
           if (Object.prototype.hasOwnProperty.call(backup, "deskAnchor")) {
             settings.handleDeskAnchor(backup.deskAnchor);
+          }
+
+          // Restored before the arrangement below, so that whichever profile
+          // the backup had active is the one the incoming positions land in.
+          if (backup.deskProfiles && Array.isArray(backup.deskProfiles.profiles)) {
+            writeProfileStore(localStorage, backup.deskProfiles);
+            console.log(
+              "Restored", backup.deskProfiles.profiles.length, "desk profile(s)",
+            );
           }
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {
             settings.handleMaxColumns(backup.maxColumns);
@@ -911,6 +930,11 @@ export const settings = makeAutoObservable({
       basePageWidth: settings.basePageWidth,
       basePageHeight: settings.basePageHeight,
       deskAnchor: settings.deskAnchor,
+
+      // Desk profiles: every profile's arrangement and icon size, and which one
+      // is active. Without this a backup restores the settings but drops every
+      // desk but one, which is exactly the loss backups exist to prevent.
+      deskProfiles: readProfileStore(localStorage),
       gridLayout: settings.gridLayout,
       limitDialScale: settings.limitDialScale,
       maxColumns: settings.maxColumns,

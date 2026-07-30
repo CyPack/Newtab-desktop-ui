@@ -1,6 +1,6 @@
 # PRD — Desk Profiles
 
-> **Durum:** taslak → onaylandı (kullanıcı, 2026-07-30)
+> **Durum:** TAMAMLANDI — T0-T10 kapandı, 13/13 canlı kontrol · 115 birim test
 > **Yazan:** Claude Opus 5 · **Dal:** `feat/desk-profiles` · **Taban:** `feat/position-backup-hardening` (a1ad273)
 > **Yerini aldığı:** `deskZoom` canlı slider'ı (a1ad273'te eklendi, bu PRD ile emekli ediliyor)
 
