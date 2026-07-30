@@ -21,6 +21,7 @@ import {
   logicalCellSize,
   maxCellSize,
   normalizeFullScreenCoords,
+  referenceCellSize,
   resolveCanvas,
 } from "./layout";
 import {
@@ -29,6 +30,22 @@ import {
   quarantine,
   recordSnapshot,
 } from "./positionStore";
+import {
+  type ProfileStore,
+  activeProfile,
+  addProfile,
+  createProfileObject,
+  deleteProfile,
+  duplicateProfile,
+  ensureStore,
+  getProfile,
+  project,
+  renameProfile,
+  setActiveProfile,
+  setCellSize,
+  syncActive,
+  writeStore as writeProfileStore,
+} from "./deskProfiles";
 
 type PanelName = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "bottom-full" | "full-screen-panel";
 
@@ -36,6 +53,92 @@ const PANEL_BOOKMARKS_KEY = "panel-bookmarks";
 const dropZonePercent = 0.6;
 const ORGANIZED_LAYOUT_KEY = "organized-layout";
 const HAS_ORGANIZED_KEY = "has-organized";
+
+// ---------------------------------------------------------------------------
+// Desk profiles
+//
+// The profile layer lives entirely on the two functions below. There are 28
+// code paths that write the arrangement and none of them know profiles exist —
+// they all funnel through savePanelBookmarks and loadPanelBookmarks, which is
+// the same seam the snapshot store hangs off and for the same reason: a rule
+// enforced in one place cannot be forgotten by the twenty-ninth caller.
+// ---------------------------------------------------------------------------
+
+let profileStore: ProfileStore | null = null;
+
+/** The ceiling a first-run profile inherits: exactly what the desk is using
+ *  now, so the upgrade is invisible. */
+function currentCeiling(): number {
+  const cap = maxCellSize(
+    settings.dialSize as string,
+    settings.squareDials as boolean,
+    settings.limitDialScale as boolean,
+    settings.maxDialScale as number,
+  );
+  // "Scale to fit" with no limit reports Infinity, which is not a size anyone
+  // can be handed. Fall back to the reference cell the page maths already uses.
+  return Number.isFinite(cap)
+    ? cap
+    : referenceCellSize(cap, settings.squareDials as boolean);
+}
+
+/** Lazily materialised so the very first read of the arrangement is what seeds
+ *  the migration — there is no earlier moment at which the desk is known. */
+function profiles(seed?: any[]): ProfileStore {
+  if (!profileStore) {
+    profileStore = ensureStore(localStorage, {
+      defaultCellSize: currentCeiling(),
+      arrangement: seed,
+      screenHint: { width: window.innerWidth, height: window.innerHeight },
+    }).store;
+  }
+  return profileStore;
+}
+
+function persistProfiles(next: ProfileStore) {
+  profileStore = next;
+  // Best effort, exactly like the snapshot ring: a profile that could not be
+  // written is an inconvenience, a save it took down with it would be a bug.
+  writeProfileStore(localStorage, next);
+}
+
+export function activeDeskCellSize(): number {
+  return activeProfile(profiles()).cellSize;
+}
+
+export function readDeskProfiles(): ProfileStore {
+  return profiles();
+}
+
+/**
+ * Switches profiles and returns the arrangement the caller should render.
+ *
+ * The order is load-bearing. The current desk has to be captured into the
+ * OUTGOING profile before activity moves, or the incoming profile's positions
+ * are written over the one being left behind — the switch would quietly
+ * flatten every profile into the last one used.
+ */
+export function switchDeskProfile(id: string, current: any[]): any[] | null {
+  const store = profiles(current);
+  if (store.activeId === id || !getProfile(store, id)) return null;
+
+  // A profile switch replaces the whole arrangement, so it earns a snapshot of
+  // its own — the throttle would otherwise swallow it in a busy session.
+  recordSnapshot(localStorage, current, { reason: "profile-switch", force: true });
+
+  const captured = syncActive(store, current);
+  const switched = setActiveProfile(captured, id);
+  persistProfiles(switched);
+
+  return normalizeFullScreenCoords(project(switched, current));
+}
+
+/** Applies a profile-store mutation and, when it changes the active profile's
+ *  size, reports that the desk needs replanning. */
+export function updateDeskProfiles(next: ProfileStore): ProfileStore {
+  persistProfiles(next);
+  return next;
+}
 
 function measureGridArea(el: HTMLElement | null) {
   const fallbackPadding = 20;
@@ -70,6 +173,10 @@ function savePanelBookmarks(panelBookmarks: any[]): boolean {
     // save that did not land must not be remembered as one that did. The store
     // throttles itself, so a burst of drags costs one snapshot, not dozens.
     recordSnapshot(localStorage, panelBookmarks, { reason: "layout-change" });
+
+    // Record the arrangement into whichever profile is active. Same reasoning
+    // as the snapshot above: attached to the save, not to any one caller.
+    persistProfiles(syncActive(profiles(panelBookmarks), panelBookmarks));
     return true;
   } catch (e) {
     console.error('Failed to save panel bookmarks:', e);
@@ -91,11 +198,17 @@ function loadPanelBookmarks(): any[] {
     const raw = localStorage.getItem(PANEL_BOOKMARKS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      // The stored arrangement seeds the profile store on first run, then the
+      // active profile's positions are laid over it. On a single-profile setup
+      // the two are identical and this is a no-op; with several profiles it is
+      // the only thing that makes switching visible.
+      const projected = project(profiles(parsed), parsed);
       // Re-based to the origin on the way in. Empty rows and columns the
       // arrangement had drifted away from are released here: that is what makes
       // area claimed in an earlier session go inactive again, and what keeps
       // the active area equal to the icons' bounding box.
-      return Array.isArray(parsed) ? normalizeFullScreenCoords(parsed) : [];
+      return normalizeFullScreenCoords(projected);
     }
     
     // Backup storage attempt
@@ -251,6 +364,10 @@ export const Grid = observer(function Grid() {
   // The desk plan: how many cells to render, where the content block sits
   // inside them, and how much to zoom. Recomputed on resize; the content block
   // itself never moves relative to itself, whatever this comes out as.
+  // The active profile's cell size, mirrored into React so the desk replans
+  // when it changes. The profile store itself lives at module scope because the
+  // storage seam has to reach it from outside any component.
+  const [deskCellSize, setDeskCellSize] = useState<number>(() => activeDeskCellSize());
   const [plan, setPlan] = useState<CanvasPlan>(() => ({
     cols: 10,
     rows: 6,
@@ -395,13 +512,10 @@ export const Grid = observer(function Grid() {
       availableWidth,
       availableHeight,
       logicalCell: logicalCellSize(settings.squareDials as boolean),
-      capCell: maxCellSize(
-        settings.dialSize as string,
-        settings.squareDials as boolean,
-        settings.limitDialScale as boolean,
-        settings.maxDialScale as number,
-        settings.deskZoom as number,
-      ),
+      // The ceiling is the active profile's, not a global setting. That is the
+      // whole point of profiles: it stays put while icons are arranged, so the
+      // grid the user is placing into cannot resize underneath them.
+      capCell: deskCellSize,
       base: {
         width: settings.basePageWidth as number,
         height: settings.basePageHeight as number,
@@ -427,7 +541,7 @@ export const Grid = observer(function Grid() {
     panelBookmarks,
     settings.basePageHeight,
     settings.basePageWidth,
-    settings.deskZoom,
+    deskCellSize,
     settings.dialSize,
     settings.gridCols,
     settings.gridLayout,
@@ -782,6 +896,72 @@ export const Grid = observer(function Grid() {
       clearCurrentTargetSlot: () => setTargetSlotIndex(null),
       
       // Export panel bookmarks for backup
+      // Desk profiles.
+      //
+      // Every mutation goes through the module-level store, is persisted, and
+      // then re-reads the active cell size into React. Going the other way —
+      // keeping the store in component state — would put it out of reach of
+      // savePanelBookmarks, which is called from module scope.
+      deskProfiles: {
+        read: () => readDeskProfiles(),
+
+        switch: (id: string) => {
+          const next = switchDeskProfile(id, panelBookmarks);
+          if (next) {
+            setPanelBookmarks(next);
+            if (isRootSafe) savePanelBookmarks(next);
+          }
+          setDeskCellSize(activeDeskCellSize());
+        },
+
+        create: (name: string, cellSize: number) => {
+          const profile = createProfileObject({
+            name,
+            cellSize,
+            screenHint: { width: window.innerWidth, height: window.innerHeight },
+          });
+          // A new profile is empty, so the desk it switches to is empty too.
+          // That is deliberate: it is the one moment when the size can be set
+          // freely, because there is no arrangement for it to disturb.
+          updateDeskProfiles(addProfile(readDeskProfiles(), profile));
+          const projected = normalizeFullScreenCoords(
+            project(readDeskProfiles(), panelBookmarks),
+          );
+          setPanelBookmarks(projected);
+          if (isRootSafe) savePanelBookmarks(projected);
+          setDeskCellSize(activeDeskCellSize());
+          return profile.id;
+        },
+
+        rename: (id: string, name: string) => {
+          updateDeskProfiles(renameProfile(readDeskProfiles(), id, name));
+        },
+
+        duplicate: (id: string, name?: string) => {
+          updateDeskProfiles(duplicateProfile(readDeskProfiles(), id, name));
+          setDeskCellSize(activeDeskCellSize());
+        },
+
+        remove: (id: string) => {
+          const before = readDeskProfiles();
+          const after = deleteProfile(before, id);
+          if (after === before) return false;
+          updateDeskProfiles(after);
+          if (before.activeId === id) {
+            const projected = normalizeFullScreenCoords(project(after, panelBookmarks));
+            setPanelBookmarks(projected);
+            if (isRootSafe) savePanelBookmarks(projected);
+          }
+          setDeskCellSize(activeDeskCellSize());
+          return true;
+        },
+
+        setCellSize: (id: string, px: number) => {
+          updateDeskProfiles(setCellSize(readDeskProfiles(), id, px));
+          setDeskCellSize(activeDeskCellSize());
+        },
+      },
+
       exportPanelBookmarks: () => {
         return JSON.parse(JSON.stringify(panelBookmarks)); // Deep copy
       },

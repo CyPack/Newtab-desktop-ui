@@ -388,3 +388,68 @@ describe("desk zoom scales the ceiling, never the floor", () => {
     expect(contentExtent(arrangement)).toEqual(extent);
   });
 });
+
+describe("a pinned cell size is what the desk uses", () => {
+  /**
+   * These pin the profile contract. A profile names a cell size, and the desk
+   * takes it — the grid dimensions become the consequence rather than the
+   * input. That inversion is the point: it is what stops the addressable grid
+   * from moving while someone is arranging icons on it.
+   */
+  const pinned = (width: number, height: number, cellSize: number, active = { cols: 4, rows: 2 }) =>
+    plan(width, height, { active, capCell: cellSize });
+
+  // The profile's promise: ask for 120px cells and get 120px cells.
+  it("TP-L1 · uses exactly the size the profile names, when it fits", () => {
+    expect(pinned(2560, 1440, 120).cell).toBeCloseTo(120, 6);
+    expect(pinned(2560, 1440, 48).cell).toBeCloseTo(48, 6);
+  });
+
+  // Still a ceiling, never a floor. A profile carried onto a screen too small
+  // for its arrangement must shrink rather than crop or scroll — otherwise the
+  // feature would break the invariant it was built on top of.
+  it("TP-L2 · shrinks below the pinned size rather than overflowing", () => {
+    const tight = pinned(400, 300, 200, { cols: 12, rows: 8 });
+    expect(tight.cell).toBeLessThan(200);
+    const { width, height } = canvasPixelSize(12, 8, tight.cell);
+    expect(width).toBeLessThanOrEqual(400 - PADDING + 0.001);
+    expect(height).toBeLessThanOrEqual(300 - PADDING + 0.001);
+  });
+
+  // The same profile on two monitors: icons are the same size on both, and the
+  // larger screen simply holds more grid. This is what "size follows the device
+  // and viewing distance, not the resolution" means in practice.
+  it("TP-L3 · keeps cells identical across screens and lets the grid absorb the difference", () => {
+    const small = pinned(1440, 900, 96);
+    const large = pinned(3440, 1440, 96);
+    expect(large.cell).toBeCloseTo(small.cell, 6);
+    expect(large.cols).toBeGreaterThan(small.cols);
+    expect(large.rows).toBeGreaterThan(small.rows);
+  });
+
+  // The defect that motivated profiles, stated as a test: with the size pinned,
+  // placing or removing icons must not change the cell size, and therefore must
+  // not change how many cells the user can address.
+  it("TP-L4 · leaves the addressable grid alone as icons come and go", () => {
+    const sizes = [
+      { cols: 1, rows: 1 },
+      { cols: 4, rows: 2 },
+      { cols: 8, rows: 5 },
+      { cols: 12, rows: 6 },
+    ].map((active) => pinned(1920, 1080, 78, active));
+
+    const cells = new Set(sizes.map((p) => p.cell.toFixed(4)));
+    const grids = new Set(sizes.map((p) => `${p.cols}x${p.rows}`));
+    expect(cells.size).toBe(1);
+    expect(grids.size).toBe(1);
+  });
+
+  // Once the arrangement outgrows the screen the grid must of course follow it,
+  // or the outermost icon would have no cell to live in.
+  it("TP-L4b · still grows the grid to contain a reach beyond the screen", () => {
+    const beyond = pinned(1920, 1080, 78, { cols: 40, rows: 30 });
+    expect(beyond.cols).toBeGreaterThanOrEqual(40);
+    expect(beyond.rows).toBeGreaterThanOrEqual(30);
+    expect(beyond.cell).toBeLessThan(78);
+  });
+});
