@@ -13,16 +13,14 @@ import { SettingsGear } from "./SettingsGear";
 import { BookmarkModal } from "../BookmarkModal";
 import {
   BASE_FONT_SIZE,
-  CAPTURE_FALLBACK_EM,
-  FALLBACK_CANVAS,
   GAP_RATIO,
+  type CanvasPlan,
   canvasPixelSize,
-  captureCanvas,
-  occupiedExtent,
-  dialWidthValue,
-  fitScale,
+  contentExtent,
   logicalCellSize,
   maxCellSize,
+  normalizeFullScreenCoords,
+  resolveCanvas,
 } from "./layout";
 
 type PanelName = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "bottom-full" | "full-screen-panel";
@@ -215,18 +213,30 @@ export const Grid = observer(function Grid() {
          : settings.gridLayout === "3-panel" ? 3 
          : 4;
   });
-  // Fixed logical canvas — stable across resizes, so every piece of layout and
-  // persistence logic below can depend on it without being re-run by a resize.
+  // The desk plan: how many cells to render, where the content block sits
+  // inside them, and how much to zoom. Recomputed on resize; the content block
+  // itself never moves relative to itself, whatever this comes out as.
+  const [plan, setPlan] = useState<CanvasPlan>(() => ({
+    cols: 10,
+    rows: 6,
+    offsetX: 0,
+    offsetY: 0,
+    cell: 80,
+    scale: 1,
+    pagesX: 1,
+    pagesY: 1,
+    overflow: false,
+    mode: "pages",
+  }));
+
+  // Bounds for the STORED coordinate space (the plan is in rendered space).
   const canvas = useMemo(
     () => ({
-      cols: settings.gridCols > 0 ? settings.gridCols : FALLBACK_CANVAS.cols,
-      rows: settings.gridRows > 0 ? settings.gridRows : FALLBACK_CANVAS.rows,
+      cols: Math.max(1, plan.cols - plan.offsetX),
+      rows: Math.max(1, plan.rows - plan.offsetY),
     }),
-    [settings.gridCols, settings.gridRows],
+    [plan.cols, plan.rows, plan.offsetX, plan.offsetY],
   );
-  // Presentation-only: how much to zoom the fixed canvas so it fits the window.
-  const [scale, setScale] = useState(1);
-  const canvasCaptured = useRef(false);
   const [targetSlotIndex, setTargetSlotIndex] = useState<{ row: number; col: number } | null>(null);
 
   // Refs for drag state
@@ -255,8 +265,11 @@ export const Grid = observer(function Grid() {
 
   const updatePanelBookmarksWithSave = useCallback((updater: (current: any[]) => any[]) => {
     setPanelBookmarks((current) => {
-      const next = updater(current);
-      
+      // Dropping onto a page left of or above the content yields negative
+      // coordinates; re-base them so storage stays non-negative. This shifts
+      // every icon by the same amount, so nothing moves relative to anything.
+      const next = normalizeFullScreenCoords(updater(current));
+
       // Save only if we're in root and data actually changed
       if (isRootSafe && JSON.stringify(current) !== JSON.stringify(next)) {
         debouncedSavePanelBookmarks(next);
@@ -317,13 +330,11 @@ export const Grid = observer(function Grid() {
     return available;
   }, []);
 
-  // The canvas (cols x rows) is FIXED, so the grid never re-flows; all we do
-  // here is work out how much to zoom it so it fits the window. One transform
-  // scales cell, gap, corner radii, title padding and text alike, which is what
-  // makes shrinking to phone width a true zoom of the same arrangement rather
-  // than a rearrangement. There is a maximum (the dial-size setting) but no
-  // minimum, and the aspect ratio is preserved.
-  const recalculateScale = useCallback(() => {
+  // Work out the desk for the current window. The content block is rigid; what
+  // this decides is how much empty desk surrounds it and how much to zoom.
+  // Above the base screen that means whole extra pages; below it, empty margin
+  // is cropped away before any icon shrinks. See Grid/layout.ts.
+  const recalculatePlan = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
 
     const { availableWidth, availableHeight } = measureGridArea(
@@ -331,29 +342,54 @@ export const Grid = observer(function Grid() {
     );
     if (availableWidth <= 0 || availableHeight <= 0) return;
 
-    const next = fitScale(
-      canvas.cols,
-      canvas.rows,
+    const next = resolveCanvas({
+      content: contentExtent(panelBookmarks),
       availableWidth,
       availableHeight,
-      logicalCellSize(settings.squareDials as boolean),
-      maxCellSize(
+      logicalCell: logicalCellSize(settings.squareDials as boolean),
+      capCell: maxCellSize(
         settings.dialSize as string,
         settings.squareDials as boolean,
         settings.limitDialScale as boolean,
         settings.maxDialScale as number,
       ),
-    );
+      minCell: settings.minCellSize as number,
+      anchor: settings.deskAnchor === "top-left" ? "top-left" : "center",
+      base: {
+        width: settings.basePageWidth as number,
+        height: settings.basePageHeight as number,
+      },
+      fixed:
+        settings.gridCols > 0 && settings.gridRows > 0
+          ? { cols: settings.gridCols as number, rows: settings.gridRows as number }
+          : null,
+      squareDials: settings.squareDials as boolean,
+    });
 
     // Ignore imperceptible churn so a ResizeObserver storm can't loop.
-    setScale((prev) => (Math.abs(prev - next) < 0.0005 ? prev : next));
+    setPlan((prev) =>
+      prev.cols === next.cols &&
+      prev.rows === next.rows &&
+      prev.offsetX === next.offsetX &&
+      prev.offsetY === next.offsetY &&
+      prev.overflow === next.overflow &&
+      Math.abs(prev.scale - next.scale) < 0.0005
+        ? prev
+        : next,
+    );
   }, [
-    canvas,
+    panelBookmarks,
+    settings.basePageHeight,
+    settings.basePageWidth,
+    settings.deskAnchor,
     settings.dialSize,
+    settings.gridCols,
     settings.gridLayout,
-    settings.squareDials,
-    settings.maxDialScale,
+    settings.gridRows,
     settings.limitDialScale,
+    settings.maxDialScale,
+    settings.minCellSize,
+    settings.squareDials,
   ]);
 
   // Organize bookmarks for layout
@@ -506,14 +542,14 @@ export const Grid = observer(function Grid() {
 
   // Effects
   useEffect(() => {
-    recalculateScale();
+    recalculatePlan();
 
     const gridEl = bottomFullGridRef.current;
     if (gridEl && typeof ResizeObserver !== 'undefined') {
       let rafId: number;
       const observer = new ResizeObserver(() => {
         cancelAnimationFrame(rafId);
-        rafId = requestAnimationFrame(() => recalculateScale());
+        rafId = requestAnimationFrame(() => recalculatePlan());
       });
       observer.observe(gridEl);
       return () => {
@@ -523,66 +559,23 @@ export const Grid = observer(function Grid() {
     }
 
     // Fallback for pre-render or no ResizeObserver
-    window.addEventListener("resize", recalculateScale);
-    return () => window.removeEventListener("resize", recalculateScale);
-  }, [recalculateScale]);
+    window.addEventListener("resize", recalculatePlan);
+    return () => window.removeEventListener("resize", recalculatePlan);
+  }, [recalculatePlan]);
 
-  // One-time capture of the fixed canvas: only when it has never been set (fresh
-  // install, or after a reset). Sized so the CURRENT viewport looks natural at
-  // the chosen dial size, and never smaller than what existing bookmarks occupy.
-  // After this it is persisted and a resize can no longer change it.
-  useEffect(() => {
-    if (settings.gridLayout !== "full-screen") return;
-    if (settings.gridCols > 0 && settings.gridRows > 0) return;
-    if (canvasCaptured.current) return;
-
-    const { availableWidth, availableHeight } = measureGridArea(
-      bottomFullGridRef.current,
-    );
-    if (availableWidth <= 0 || availableHeight <= 0) return;
-
-    const cap = maxCellSize(
-      settings.dialSize as string,
-      settings.squareDials as boolean,
-      settings.limitDialScale as boolean,
-      settings.maxDialScale as number,
-    );
-    const referenceCell = Number.isFinite(cap)
-      ? cap
-      : dialWidthValue(settings.squareDials as boolean) *
-        CAPTURE_FALLBACK_EM *
-        BASE_FONT_SIZE;
-
-    const { cols, rows } = captureCanvas(
-      availableWidth,
-      availableHeight,
-      referenceCell,
-      panelBookmarks,
-    );
-
-    canvasCaptured.current = true;
-    settings.handleGridCanvas(cols, rows);
-  }, [
-    settings.gridLayout,
-    settings.gridCols,
-    settings.gridRows,
-    settings.dialSize,
-    settings.squareDials,
-    settings.limitDialScale,
-    settings.maxDialScale,
-    panelBookmarks,
-  ]);
-
-  // Safety net: if a bookmark ends up outside the canvas (legacy data, a smaller
-  // canvas restored from a backup, a manual settings change), GROW the canvas
-  // rather than moving the icon. Positions are the thing we promise to preserve.
+  // Safety net for an explicit canvas: if a bookmark ends up outside it (legacy
+  // data, a smaller canvas restored from a backup, a manual settings change),
+  // GROW the canvas rather than moving the icon. Positions are the thing we
+  // promise to preserve. In automatic mode the desk sizes itself, so there is
+  // nothing to grow.
   useEffect(() => {
     if (settings.gridLayout !== "full-screen") return;
     if (settings.gridCols <= 0 || settings.gridRows <= 0) return;
 
-    const extent = occupiedExtent(panelBookmarks);
-    const cols = Math.max(settings.gridCols, extent.cols);
-    let rows = Math.max(settings.gridRows, extent.rows);
+    const extent = contentExtent(panelBookmarks);
+    if (extent.count === 0) return;
+    const cols = Math.max(settings.gridCols as number, extent.maxCol + 1);
+    let rows = Math.max(settings.gridRows as number, extent.maxRow + 1);
     while (cols * rows < extent.count) rows += 1;
 
     if (cols !== settings.gridCols || rows !== settings.gridRows) {
@@ -1790,35 +1783,42 @@ useEffect(() => {
 
   const renderFullScreenPanel = () => {
     const list = getBookmarksByPanel("full-screen-panel");
-    const { cols, rows } = canvas;
-    // The canvas is laid out ONCE at its logical size and then zoomed by a
-    // single transform, so nothing about the arrangement depends on the window.
+    const { cols, rows, offsetX, offsetY, scale } = plan;
+    // The desk is laid out ONCE at its logical size and zoomed by a single
+    // transform, so nothing about the arrangement depends on the window.
     const logicalCell = logicalCellSize(settings.squareDials as boolean);
     const logicalGap = logicalCell * GAP_RATIO;
     const logical = canvasPixelSize(cols, rows, logicalCell);
 
-    // Build occupied map: "row,col" -> bookmark. Keep in-bounds, unique coords.
+    // Stored coordinates are the source of truth; rendered coordinates are just
+    // those shifted by the current desk offset. Every handler below converts
+    // back before touching state, so what is saved never depends on the window.
+    const toStored = (row: number, col: number) => ({
+      row: row - offsetY,
+      col: col - offsetX,
+    });
+
+    // Build occupied map, keyed in RENDERED space.
     const occupiedMap = new Map<string, any>();
-    const overflow: any[] = [];
+    const spare: any[] = [];
     list.forEach((bm) => {
-      const inBounds =
-        bm.row !== undefined && bm.col !== undefined &&
-        bm.row < rows && bm.col < cols;
-      const key = inBounds ? coordToKey(bm.row, bm.col) : "";
+      const row = (bm.row ?? 0) + offsetY;
+      const col = (bm.col ?? 0) + offsetX;
+      const inBounds = row >= 0 && col >= 0 && row < rows && col < cols;
+      const key = inBounds ? coordToKey(row, col) : "";
       if (inBounds && !occupiedMap.has(key)) {
         occupiedMap.set(key, bm);
       } else {
-        overflow.push(bm);
+        spare.push(bm);
       }
     });
-    // Last-resort placement for bookmarks that share a coordinate. Out-of-bounds
-    // ones normally never reach here: the canvas grows to contain them instead of
-    // moving them (see the canvas safety-net effect above).
+    // Last-resort placement for bookmarks that share a coordinate. The desk is
+    // sized to contain the whole content block, so this normally stays empty.
     let oi = 0;
-    for (let r = 0; r < rows && oi < overflow.length; r++) {
-      for (let c = 0; c < cols && oi < overflow.length; c++) {
+    for (let r = 0; r < rows && oi < spare.length; r++) {
+      for (let c = 0; c < cols && oi < spare.length; c++) {
         const key = coordToKey(r, c);
-        if (!occupiedMap.has(key)) occupiedMap.set(key, overflow[oi++]);
+        if (!occupiedMap.has(key)) occupiedMap.set(key, spare[oi++]);
       }
     }
 
@@ -1832,7 +1832,7 @@ useEffect(() => {
 
     const handleSlotDoubleClick = (row: number, col: number) => {
       if (!occupiedMap.has(coordToKey(row, col))) {
-        setTargetSlotIndex({ row, col });
+        setTargetSlotIndex(toStored(row, col));
         targetPanelRef.current = "full-screen-panel";
         openModalForPanel("full-screen-panel");
       }
@@ -1841,9 +1841,11 @@ useEffect(() => {
     const handleSlotRightClick = (e: React.MouseEvent, row: number, col: number) => {
       e.preventDefault();
       if (!occupiedMap.has(coordToKey(row, col))) {
-        setTargetSlotIndex({ row, col });
+        setTargetSlotIndex(toStored(row, col));
       }
     };
+
+    const anchorAtCorner = settings.deskAnchor === "top-left";
 
     return (
       <div
@@ -1851,18 +1853,17 @@ useEffect(() => {
         style={{
           // Fallback for the standalone case; Bookmarks/styles.css overrides
           // this with a flex fill so a banner shrinks the area instead of
-          // pushing the canvas past the fold.
+          // pushing the desk past the fold.
           height: "100vh",
           width: "100%",
           display: "flex",
-          // Anchored top-left, not centred. The canvas needs ONE fixed reference
-          // corner: centring makes the whole arrangement creep inwards as the
-          // window shrinks, which reads as drift even though the icons keep
-          // their relative positions. The top-left corner is the origin
-          // everything else is measured from.
-          alignItems: "flex-start",
-          justifyContent: "flex-start",
-          overflow: "hidden",
+          // Where the desk is held. Centre keeps the content block in the middle
+          // of every screen; top-left pins it to a fixed corner. Either way it is
+          // a FIXED relationship, which is what stops it appearing to drift.
+          alignItems: anchorAtCorner ? "flex-start" : "center",
+          justifyContent: anchorAtCorner ? "flex-start" : "center",
+          // Only scrolls once the desk has hit the minimum cell size.
+          overflow: plan.overflow ? "auto" : "hidden",
           padding: "20px",
           boxSizing: "border-box",
         }}
@@ -1872,14 +1873,25 @@ useEffect(() => {
         onDragLeave={handlePanelDragLeave}
         onDrop={(e) => handleDropOnPanelEnd(e, "full-screen-panel")}
       >
+      {/* A transform doesn't change layout size, so the desk gets a spacer at
+          its SCALED dimensions. Without it, centring and scrolling would work
+          off the unscaled size and place the desk wrongly. */}
+      <div
+        className="FullScreenDesk"
+        style={{
+          position: "relative",
+          flex: "0 0 auto",
+          width: `${logical.width * scale}px`,
+          height: `${logical.height * scale}px`,
+        }}
+      >
       <div
         className={clsx("Grid", isMaxFontSize && "max-width")}
         style={
           {
-            // Laid out at the LOGICAL size and zoomed as a whole. Column and row
-            // counts come from settings and never change with the window, and a
-            // single transform carries cell size, gaps, radii, padding and text
-            // together — so the arrangement is identical at every resolution.
+            // Laid out at the LOGICAL size and zoomed as a whole: one transform
+            // carries cell size, gaps, radii, padding and text together, so the
+            // arrangement is identical at every resolution.
             fontSize: `${BASE_FONT_SIZE}px`,
             display: "grid",
             gridTemplateColumns: `repeat(${cols}, ${logicalCell}px)`,
@@ -1888,11 +1900,12 @@ useEffect(() => {
             width: `${logical.width}px`,
             height: `${logical.height}px`,
             // .Grid ships a max-width rule for the column-limited panel layouts;
-            // it must not clip the canvas here.
+            // it must not clip the desk here.
             maxWidth: "none",
-            flex: "0 0 auto",
+            position: "absolute",
+            top: 0,
+            left: 0,
             transform: `scale(${scale})`,
-            // Scale towards the anchor corner so it stays put at every zoom.
             transformOrigin: "top left",
             padding: 0,
             margin: 0,
@@ -1938,7 +1951,8 @@ useEffect(() => {
               e.preventDefault();
               e.stopPropagation();
               e.currentTarget.classList.remove('drag-over-slot');
-              handleDropOnSlot(e, row, col);
+              const target = toStored(row, col);
+              handleDropOnSlot(e, target.row, target.col);
             }}
             onDoubleClick={() => handleSlotDoubleClick(row, col)}
             onContextMenu={(e) => handleSlotRightClick(e, row, col)}
@@ -1951,7 +1965,8 @@ useEffect(() => {
                 data-current-col={col}
                 draggable
                 onDragStart={(e) => {
-                  handleDragStart(e, "full-screen-panel", { row, col }, bm.id);
+                  // Carry the STORED coordinate, so a drop compares like with like.
+                  handleDragStart(e, "full-screen-panel", toStored(row, col), bm.id);
                 }}
                 onDragEnd={handleDragEnd}
                 style={{
@@ -1968,6 +1983,7 @@ useEffect(() => {
             )}
           </div>
         ))}
+      </div>
       </div>
       </div>
     );

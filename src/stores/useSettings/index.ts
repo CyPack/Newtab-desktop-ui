@@ -202,12 +202,18 @@ const defaultSettings = {
   dialImages: {} as DialImages,
   dialSize: "tiny",
   firstRun: !lastVersion,
-  // Fixed logical canvas for the full-screen layout. The grid ALWAYS renders
-  // this many columns/rows regardless of viewport size — only the cell size
-  // scales — so icon positions never reflow. 0 = not captured yet (the Grid
-  // captures it once from the first viewport, then it stays put).
+  // Full-screen desk sizing. 0/0 means automatic: the desk is measured in
+  // pages, one page being what the base screen below holds. Setting explicit
+  // columns and rows pins the desk to exactly that size instead.
   gridCols: 0,
   gridRows: 0,
+  // The reference screen that defines one page — a 24" monitor in CSS pixels.
+  basePageWidth: 1920,
+  basePageHeight: 1080,
+  // Which corner (or centre) the content block is held against.
+  deskAnchor: "center",
+  // Cell size at which shrinking stops and the desk scrolls instead.
+  minCellSize: 32,
   gridLayout: "full-screen",
   limitDialScale: true,
   maxColumns: "Unlimited",
@@ -243,6 +249,18 @@ export const settings = makeAutoObservable({
     (storage[`${apiVersion}-grid-cols`] as number) ?? defaultSettings.gridCols,
   gridRows:
     (storage[`${apiVersion}-grid-rows`] as number) ?? defaultSettings.gridRows,
+  basePageWidth:
+    (storage[`${apiVersion}-base-page-width`] as number) ??
+    defaultSettings.basePageWidth,
+  basePageHeight:
+    (storage[`${apiVersion}-base-page-height`] as number) ??
+    defaultSettings.basePageHeight,
+  deskAnchor:
+    (storage[`${apiVersion}-desk-anchor`] as string) ??
+    defaultSettings.deskAnchor,
+  minCellSize:
+    (storage[`${apiVersion}-min-cell-size`] as number) ??
+    defaultSettings.minCellSize,
   gridLayout: storage[`${apiVersion}-grid-layout`] || defaultSettings.gridLayout,
   limitDialScale:
     (storage[`${apiVersion}-limit-dial-scale`] as boolean) ??
@@ -357,6 +375,30 @@ export const settings = makeAutoObservable({
     settings.gridCols = safeCols;
     settings.gridRows = safeRows;
     bc.postMessage({ gridCols: safeCols, gridRows: safeRows });
+  },
+  // The reference screen one page is measured against. Physical inches aren't
+  // available to a web page, so a 24" monitor is expressed as its CSS pixels.
+  handleBasePage(width: number, height: number) {
+    const safeWidth = Math.max(320, Math.min(7680, Math.round(width) || 1920));
+    const safeHeight = Math.max(240, Math.min(4320, Math.round(height) || 1080));
+    browser.storage.local.set({
+      [`${apiVersion}-base-page-width`]: safeWidth,
+      [`${apiVersion}-base-page-height`]: safeHeight,
+    });
+    settings.basePageWidth = safeWidth;
+    settings.basePageHeight = safeHeight;
+    bc.postMessage({ basePageWidth: safeWidth, basePageHeight: safeHeight });
+  },
+  handleDeskAnchor(value: string) {
+    browser.storage.local.set({ [`${apiVersion}-desk-anchor`]: value });
+    settings.deskAnchor = value;
+    bc.postMessage({ deskAnchor: value });
+  },
+  handleMinCellSize(value: number) {
+    const safe = Math.max(8, Math.min(160, Math.round(value) || 32));
+    browser.storage.local.set({ [`${apiVersion}-min-cell-size`]: safe });
+    settings.minCellSize = safe;
+    bc.postMessage({ minCellSize: safe });
   },
   handleMaxColumns(value: string) {
     browser.storage.local.set({ [`${apiVersion}-max-columns`]: value });
@@ -486,6 +528,12 @@ export const settings = makeAutoObservable({
     settings.handleDialSize(defaultSettings.dialSize);
     settings.handleGridLayout(defaultSettings.gridLayout);
     settings.handleGridCanvas(defaultSettings.gridCols, defaultSettings.gridRows);
+    settings.handleBasePage(
+      defaultSettings.basePageWidth,
+      defaultSettings.basePageHeight,
+    );
+    settings.handleDeskAnchor(defaultSettings.deskAnchor);
+    settings.handleMinCellSize(defaultSettings.minCellSize);
     settings.handleMaxColumns(defaultSettings.maxColumns);
     settings.handleLimitDialScale(defaultSettings.limitDialScale);
     settings.handleMaxDialScale(defaultSettings.maxDialScale);
@@ -565,6 +613,18 @@ export const settings = makeAutoObservable({
               "x",
               backup.gridRows,
             );
+          }
+          if (
+            Object.prototype.hasOwnProperty.call(backup, "basePageWidth") &&
+            Object.prototype.hasOwnProperty.call(backup, "basePageHeight")
+          ) {
+            settings.handleBasePage(backup.basePageWidth, backup.basePageHeight);
+          }
+          if (Object.prototype.hasOwnProperty.call(backup, "deskAnchor")) {
+            settings.handleDeskAnchor(backup.deskAnchor);
+          }
+          if (Object.prototype.hasOwnProperty.call(backup, "minCellSize")) {
+            settings.handleMinCellSize(backup.minCellSize);
           }
           if (Object.prototype.hasOwnProperty.call(backup, "maxColumns")) {
             settings.handleMaxColumns(backup.maxColumns);
@@ -815,6 +875,10 @@ export const settings = makeAutoObservable({
       dialSize: settings.dialSize,
       gridCols: settings.gridCols,
       gridRows: settings.gridRows,
+      basePageWidth: settings.basePageWidth,
+      basePageHeight: settings.basePageHeight,
+      deskAnchor: settings.deskAnchor,
+      minCellSize: settings.minCellSize,
       gridLayout: settings.gridLayout,
       limitDialScale: settings.limitDialScale,
       maxColumns: settings.maxColumns,

@@ -19,8 +19,11 @@ export const SettingsContent = observer(function SettingsContent() {
     handleCustomColor,
     handleCustomImage,
     handleDefaultFolder,
+    handleBasePage,
+    handleDeskAnchor,
     handleDialSize,
     handleGridCanvas,
+    handleMinCellSize,
     handleGridLayout,
     handleLimitDialScale,
     handleMaxColumns,
@@ -39,10 +42,12 @@ export const SettingsContent = observer(function SettingsContent() {
 
   const [defaultFolderValue, setDefaultFolderValue] = useState("");
 
-  // 0 means "not captured yet" — the grid picks a canvas the first time it
-  // renders. Mirror the Grid's fallback here so the control never shows a zero.
-  const canvasCols = (settings.gridCols as number) > 0 ? (settings.gridCols as number) : 10;
-  const canvasRows = (settings.gridRows as number) > 0 ? (settings.gridRows as number) : 6;
+  // 0/0 means automatic: the desk sizes itself in pages. Show a sensible
+  // starting point in the manual controls so they never display a zero.
+  const fixedDesk =
+    (settings.gridCols as number) > 0 && (settings.gridRows as number) > 0;
+  const canvasCols = fixedDesk ? (settings.gridCols as number) : 14;
+  const canvasRows = fixedDesk ? (settings.gridRows as number) : 7;
 
   const wallpaperColors = [
     "Dark",
@@ -235,78 +240,215 @@ export const SettingsContent = observer(function SettingsContent() {
         </div>
       </div>
       {settings.gridLayout === "full-screen" && (
-        <div className="setting-wrapper setting-group canvas-size-group">
-          <div className="setting-label">
-            <div className="setting-title" id="grid-canvas-title">
-              Desktop Grid
-            </div>
-            <div className="setting-description" id="grid-canvas-description">
-              How many columns and rows your desktop has. This is fixed: resizing
-              the window scales everything together instead of rearranging it, so
-              icons keep the same positions and spacing at any screen size.
-              Changing these numbers is the only thing that moves them.
-            </div>
-          </div>
-          <div className="setting-option canvas-size-control">
-            <div className="canvas-size-row">
-              <label className="canvas-size-field">
-                <span>Columns</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={60}
-                  value={canvasCols}
-                  onChange={(e) =>
-                    handleGridCanvas(parseInt(e.target.value, 10), canvasRows)
-                  }
-                  className="input canvas-size-input"
-                  aria-label="Desktop grid columns"
-                />
-              </label>
-              <span className="canvas-size-times" aria-hidden="true">
-                ×
-              </span>
-              <label className="canvas-size-field">
-                <span>Rows</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={40}
-                  value={canvasRows}
-                  onChange={(e) =>
-                    handleGridCanvas(canvasCols, parseInt(e.target.value, 10))
-                  }
-                  className="input canvas-size-input"
-                  aria-label="Desktop grid rows"
-                />
-              </label>
-            </div>
-            <div className="canvas-preview" aria-hidden="true">
-              <div
-                className="canvas-preview-frame"
-                style={{
-                  gridTemplateColumns: `repeat(${canvasCols}, 1fr)`,
-                  gridTemplateRows: `repeat(${canvasRows}, 1fr)`,
-                  aspectRatio: `${canvasCols} / ${canvasRows}`,
-                }}
-              >
-                {Array.from({ length: canvasCols * canvasRows }, (_, i) => (
-                  <span className="canvas-preview-cell" key={i} />
-                ))}
+        <>
+          <div className="setting-wrapper setting-group canvas-size-group">
+            <div className="setting-label">
+              <div className="setting-title" id="base-page-title">
+                Base Screen
               </div>
-              <span className="canvas-preview-caption">
-                {canvasCols * canvasRows} slots
-              </span>
+              <div className="setting-description" id="base-page-description">
+                The screen your desktop is designed for &mdash; a 24&Prime;
+                monitor by default. This is one page. A wider or taller monitor
+                gets whole extra pages of desk beside and below it, rather than
+                bigger icons or wasted margin. A smaller one trims the empty
+                columns and rows first, and only then scales everything down.
+              </div>
             </div>
-            <button
-              type="button"
-              className="canvas-size-reset"
-              onClick={() => handleGridCanvas(0, 0)}
-            >
-              Reset to auto-fit
-            </button>
+            <div className="setting-option canvas-size-control">
+              <div className="canvas-size-row">
+                <label className="canvas-size-field">
+                  <span>Width</span>
+                  <input
+                    type="number"
+                    min={320}
+                    max={7680}
+                    step={80}
+                    value={settings.basePageWidth as number}
+                    onChange={(e) =>
+                      handleBasePage(
+                        parseInt(e.target.value, 10),
+                        settings.basePageHeight as number,
+                      )
+                    }
+                    className="input canvas-size-input"
+                    aria-label="Base screen width in pixels"
+                  />
+                </label>
+                <span className="canvas-size-times" aria-hidden="true">
+                  &times;
+                </span>
+                <label className="canvas-size-field">
+                  <span>Height</span>
+                  <input
+                    type="number"
+                    min={240}
+                    max={4320}
+                    step={60}
+                    value={settings.basePageHeight as number}
+                    onChange={(e) =>
+                      handleBasePage(
+                        settings.basePageWidth as number,
+                        parseInt(e.target.value, 10),
+                      )
+                    }
+                    className="input canvas-size-input"
+                    aria-label="Base screen height in pixels"
+                  />
+                </label>
+              </div>
+              <span className="canvas-preview-caption">one page = 1 screen</span>
+            </div>
           </div>
-        </div>
+
+          <div className="setting-wrapper setting-group">
+            <div className="setting-label">
+              <div className="setting-title" id="desk-anchor-title">
+                Desk Anchor
+              </div>
+              <div className="setting-description" id="desk-anchor-description">
+                Where your icons are held as the screen changes size. Either way
+                the relationship is fixed, so nothing appears to drift.
+              </div>
+            </div>
+            <div className="setting-option select">
+              <select
+                onChange={(e) => handleDeskAnchor(e.target.value)}
+                value={settings.deskAnchor as string}
+                className="input"
+                aria-labelledby="desk-anchor-title"
+                aria-describedby="desk-anchor-description"
+              >
+                <option value="center">Centred</option>
+                <option value="top-left">Top left corner</option>
+              </select>
+              <CaretDown />
+            </div>
+          </div>
+
+          <div className="setting-wrapper setting-group">
+            <div className="setting-label">
+              <div className="setting-title" id="min-cell-title">
+                Minimum Icon Size
+              </div>
+              <div className="setting-description" id="min-cell-description">
+                How small icons may get before the desk starts scrolling instead
+                of shrinking further. Positions stay exactly as they are either
+                way &mdash; this only decides when to stop zooming out.
+              </div>
+            </div>
+            <div className="setting-option scale-limit-control">
+              <div
+                className="scale-slider-row"
+                style={{ display: "flex", alignItems: "center" }}
+              >
+                <input
+                  type="range"
+                  min={8}
+                  max={96}
+                  step={4}
+                  value={settings.minCellSize as number}
+                  onChange={(e) =>
+                    handleMinCellSize(parseInt(e.target.value, 10))
+                  }
+                  className="scale-slider"
+                  aria-label="Minimum icon cell size in pixels"
+                />
+                <span className="scale-value">{settings.minCellSize}px</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="setting-wrapper setting-group canvas-size-group">
+            <div className="setting-label">
+              <div className="setting-title" id="grid-canvas-title">
+                Fixed Desk Size
+              </div>
+              <div className="setting-description" id="grid-canvas-description">
+                Optional. Pin the desk to an exact number of columns and rows and
+                it will never grow into extra pages or crop &mdash; just scale.
+                Leave it off to let the page logic above do the work.
+              </div>
+            </div>
+            <div className="setting-option canvas-size-control">
+              <Switch
+                aria-labelledby="grid-canvas-title"
+                aria-describedby="grid-canvas-description"
+                onClick={() =>
+                  fixedDesk
+                    ? handleGridCanvas(0, 0)
+                    : handleGridCanvas(canvasCols, canvasRows)
+                }
+                className="switch-root"
+                checked={fixedDesk}
+              >
+                <span className="switch-thumb" />
+              </Switch>
+              {fixedDesk && (
+                <>
+                  <div className="canvas-size-row">
+                    <label className="canvas-size-field">
+                      <span>Columns</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={canvasCols}
+                        onChange={(e) =>
+                          handleGridCanvas(
+                            parseInt(e.target.value, 10),
+                            canvasRows,
+                          )
+                        }
+                        className="input canvas-size-input"
+                        aria-label="Desk columns"
+                      />
+                    </label>
+                    <span className="canvas-size-times" aria-hidden="true">
+                      &times;
+                    </span>
+                    <label className="canvas-size-field">
+                      <span>Rows</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={40}
+                        value={canvasRows}
+                        onChange={(e) =>
+                          handleGridCanvas(
+                            canvasCols,
+                            parseInt(e.target.value, 10),
+                          )
+                        }
+                        className="input canvas-size-input"
+                        aria-label="Desk rows"
+                      />
+                    </label>
+                  </div>
+                  <div className="canvas-preview" aria-hidden="true">
+                    <div
+                      className="canvas-preview-frame"
+                      style={{
+                        gridTemplateColumns: `repeat(${canvasCols}, 1fr)`,
+                        gridTemplateRows: `repeat(${canvasRows}, 1fr)`,
+                        aspectRatio: `${canvasCols} / ${canvasRows}`,
+                      }}
+                    >
+                      {Array.from(
+                        { length: canvasCols * canvasRows },
+                        (_, i) => (
+                          <span className="canvas-preview-cell" key={i} />
+                        ),
+                      )}
+                    </div>
+                    <span className="canvas-preview-caption">
+                      {canvasCols * canvasRows} slots
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </>
       )}
       <div className="setting-wrapper setting-group">
         <div className="setting-label">

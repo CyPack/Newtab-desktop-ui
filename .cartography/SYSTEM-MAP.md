@@ -265,3 +265,59 @@ scope'lanmış flex-fill düzeltmesi (panel layout'lara DOKUNMAZ).
 > z-index:1000`, kutu 1880-1896 × 24-40) AlertBanner'ın dismiss butonunun (1870-1900 × 14-44)
 > TAM MERKEZİNE biniyor → banner'ı kapatmak için tam ortaya değil biraz SOLA tıklamak gerekiyor.
 > Otomasyonda `click({position:{x:5,y:15}})` şart; `force:true` işe yaramaz (event dişliye gider).
+
+---
+
+## 📄 SAYFA MODELİ (2026-07-30, kullanıcı gereksinimi)
+
+**Kullanıcı kuralları (aynen):**
+1. 34"/57" monitörlerde sağa/sola ekstra **stage** eklenmeli.
+2. Büyükten küçüğe geçerken boş kolon/satırlar **1 boşluk kalana kadar kırpılarak** ilerlenmeli.
+3. Tamamen boş kolon/row kalmadıysa o frame kabul edilip ekrana göre ayarlanır.
+4. **24" alan base default** olarak hesaplanır; sağa/aşağı taşan her alan bir **ekstra page**.
+   Geniş ekranda tek page gibi davranır; çok büyük ekranlarda page hesabıyla hareket edilir.
+
+**Model:**
+```
+BASE PAGE = referans ekranın (settings.basePageWidth×Height, varsayılan 1920×1080 = 24")
+            cap hücre boyutunda tuttuğu C×R hücre
+≥ 1 sayfa  → mode="pages"  : pagesX=round(availW/pageW), pagesY=round(availH/pageH)
+                             cols=pageCols*pagesX (TAM sayfa), hücre cap'te, kırpma YOK
+< 1 sayfa  → mode="cropped": cols=clamp(fitCount(availW,ref), content+1, pageCols)
+                             önce boş kenar kırpılır, SONRA zoom
+her ikisinde → minCellSize tabanı; altına inmesi gerekirse zoom durur, masa KAYDIRILIR
+```
+İçerik bloğu (ikonların bounding box'ı) KATI — hiçbir rejimde yeniden dizilmez.
+
+**Koordinat uzayları (kritik):** `stored` (kalıcı, ≥0) ↔ `rendered` = stored + plan.offset.
+Tüm DnD/modal handler'ları `toStored()` ile geri çevirir; kaydedilen veri pencereye BAĞLI DEĞİL.
+Sol/üst sayfaya bırakma negatif üretir → `normalizeFullScreenCoords` tek noktadan re-base eder
+(hepsi aynı miktarda kayar → göreli konum korunur).
+
+**Çıpa:** `settings.deskAnchor` = `center` (varsayılan) | `top-left`.
+center → içerik bloğu her ekranda ortada · top-left → sol üst köşeye çakılı. İkisi de SABİT ilişki.
+
+**Render ağacı (transform + scroll için ZORUNLU 3 katman):**
+```
+.FullScreenViewport  (flex, anchor hizası, overflow: plan.overflow ? auto : hidden)
+  └ .FullScreenDesk  (SPACER — logical*scale boyutunda; transform layout boyutunu DEĞİŞTİRMEZ,
+                      bu olmadan ortalama ve kaydırma ölçeklenmemiş boyuta göre yanlış çalışır)
+      └ .Grid        (logical boyut + transform: scale, transform-origin: top left)
+```
+
+**Canlı ölçüm (2026-07-30, tek yükleme + sadece resize):**
+
+| ekran | cols×rows | sayfa | hücre | scroll |
+|---|---|---|---|---|
+| 57" 5120×2160 | 63×22 | 3.00 | 70.87 | hidden |
+| 34" 3440×1440 | 42×11 | 2.00 | 71.22 | hidden |
+| 27" 2560×1440 | 21×11 | 1.00 | 77.60 | hidden |
+| **24" 1920×1080 BASE** | **21×11** | **1.00** | **77.60** | hidden |
+| laptop 1366×768 | 15×8 | 0.71 | **77.60** (kırpıldı, ikon küçülmedi) | hidden |
+| 1024×700 | 11×7 | 0.52 | **77.60** (kırpıldı) | hidden |
+| 800×600 | 11×6 | 0.52 | 61.29 (kırpma bitti → zoom) | hidden |
+| 412×915 | 11×10 | 0.52 | **32.00** (taban) | **auto** |
+| 320×480 | 11×5 | 0.52 | **32.00** (taban) | **auto** |
+
+Göreli ikon dizilimi 9 ekranın hepsinde BİREBİR aynı · büyük ekranlar tam sayı sayfa · konsol hatası yok.
+Testler: `layout.test.ts` 27 test (60/60 toplam) · `npm run build` yeşil · `tsc` 34 = baseline.

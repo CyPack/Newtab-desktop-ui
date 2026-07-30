@@ -1,20 +1,27 @@
 /**
- * Fixed-canvas layout maths for the full-screen grid.
+ * Page-based layout maths for the full-screen grid.
  *
- * The core idea: the desktop is a FIXED logical canvas of `cols x rows`, laid
- * out once at a constant logical cell size, and then *zoomed* into whatever
- * viewport it gets via a single CSS transform. It is never re-flowed to suit the
- * window.
+ * The desktop is measured in PAGES. One page is the cell grid that fits a
+ * reference screen — a 24" monitor, 1920x1080 CSS px by default — at the
+ * current dial size. That page is the unit everything is optimised around.
  *
- * Two consequences, both of them the point of the design:
- *   1. An icon at (row 2, col 5) sits at exactly the same relative spot, with
- *      exactly the same relative spacing, on a 4K monitor and in a phone-width
- *      window. Only its pixel size differs.
- *   2. Because it is a transform and not a re-layout, details expressed in fixed
- *      pixels (corner radii, title padding, minimum font sizes) scale along with
- *      everything else instead of bloating at small sizes.
+ *   at or above one page   the desk is a whole number of pages. Extra screen
+ *                          area to the right or below becomes another page of
+ *                          desk rather than wasted margin, and icons stay at
+ *                          their capped size. On a 34" or 57" monitor you get
+ *                          two or three pages side by side, read as one desk.
  *
- * Pure functions, no DOM and no store access, so the invariant is testable.
+ *   below one page         empty trailing columns and rows are cropped away
+ *                          first, down to a single empty one, before anything
+ *                          shrinks. Only once the content plus that one empty
+ *                          margin still doesn't fit does the whole thing zoom
+ *                          out — and it stops at a minimum cell size, after
+ *                          which the desk scrolls instead of becoming unusable.
+ *
+ * Throughout, the content block itself is RIGID: icons never rearrange relative
+ * to each other. Only the empty desk around them, and the zoom, respond to the
+ * screen. Everything here is pure — no DOM, no store — so that promise is
+ * testable.
  */
 
 /** Gap between cells, expressed as a fraction of the cell size. */
@@ -22,8 +29,14 @@ export const GAP_RATIO = 0.14;
 
 export const BASE_FONT_SIZE = 16;
 
-/** Used when the canvas has never been captured. */
-export const FALLBACK_CANVAS = { cols: 10, rows: 6 };
+/** Reference screen that defines one page: a 24" monitor, in CSS pixels. */
+export const BASE_PAGE = { width: 1920, height: 1080 };
+
+/** Padding between the desk and the window edge, in px. */
+export const VIEWPORT_PADDING = 20;
+
+/** Smallest cell we will shrink to before the desk starts scrolling. */
+export const DEFAULT_MIN_CELL = 32;
 
 /** Dial-size setting -> cell width in em (matches Grid/styles.css). */
 export const DIAL_SIZE_EM: Record<string, number> = {
@@ -36,10 +49,12 @@ export const DIAL_SIZE_EM: Record<string, number> = {
 };
 
 /**
- * Reference size used only while capturing the canvas when the max-scale limit
- * is switched off — an unbounded cap can't tell us how many cells to lay out.
+ * Reference size used when the max-scale limit is switched off — an unbounded
+ * cap can't tell us how many cells make up a page.
  */
 export const CAPTURE_FALLBACK_EM = 1.6;
+
+export type DeskAnchor = "center" | "top-left";
 
 /** Cell width in em units, per the --dial-width-value custom property. */
 export function dialWidthValue(squareDials: boolean) {
@@ -47,18 +62,16 @@ export function dialWidthValue(squareDials: boolean) {
 }
 
 /**
- * The cell size the canvas is actually laid out at, before any zoom. Keeping
- * this constant (and equal to one --dial-width at the base font size) is what
- * lets a plain CSS transform do all the scaling.
+ * The cell size the canvas is laid out at before any zoom. Keeping this
+ * constant is what lets a plain CSS transform do all the scaling.
  */
 export function logicalCellSize(squareDials: boolean) {
   return dialWidthValue(squareDials) * BASE_FONT_SIZE;
 }
 
 /**
- * Upper bound for one grid cell, in px, derived from the dial-size setting.
- * This is a MAXIMUM only — there is deliberately no minimum, so the grid can
- * shrink without limit and every icon stays visible.
+ * Upper bound for one grid cell, in px, from the dial-size setting. A MAXIMUM
+ * only — nothing here imposes a minimum; that is the min-cell floor's job.
  */
 export function maxCellSize(
   dialSize: string,
@@ -73,7 +86,14 @@ export function maxCellSize(
   return width * (DIAL_SIZE_EM[dialSize] ?? DIAL_SIZE_EM.tiny) * BASE_FONT_SIZE;
 }
 
-/** Untransformed pixel size of the canvas at a given cell size. */
+/** A cap of Infinity can't size a page; fall back to the classic 1.6em ceiling. */
+export function referenceCellSize(capCell: number, squareDials: boolean) {
+  return Number.isFinite(capCell)
+    ? capCell
+    : dialWidthValue(squareDials) * CAPTURE_FALLBACK_EM * BASE_FONT_SIZE;
+}
+
+/** Untransformed pixel size of a cols x rows grid at a given cell size. */
 export function canvasPixelSize(cols: number, rows: number, cell: number) {
   return {
     width: cell * (cols + (cols - 1) * GAP_RATIO),
@@ -81,64 +101,219 @@ export function canvasPixelSize(cols: number, rows: number, cell: number) {
   };
 }
 
-/**
- * The one number the whole layout hangs on: how much to zoom the fixed canvas so
- * it fits the available area, never exceeding `maxCell` per cell and with no
- * lower bound. Aspect ratio is preserved — leftover space becomes an even
- * margin rather than extra columns.
- */
-export function fitScale(
-  cols: number,
-  rows: number,
-  availableWidth: number,
-  availableHeight: number,
-  logicalCell: number,
-  maxCell: number,
-) {
-  const { width, height } = canvasPixelSize(cols, rows, logicalCell);
-  const byWidth = availableWidth / width;
-  const byHeight = availableHeight / height;
-  const byCap = maxCell / logicalCell;
-  return Math.max(0.001, Math.min(byWidth, byHeight, byCap));
+/** How many whole cells of the given size fit into `available` px. */
+export function fitCount(available: number, cell: number) {
+  const gap = cell * GAP_RATIO;
+  return Math.max(1, Math.floor((available + gap) / (cell + gap)));
 }
 
-/** Largest coordinates any full-screen bookmark currently occupies. */
-export function occupiedExtent(
+/** The bounding box of the placed icons — the rigid content block. */
+export function contentExtent(
   bookmarksList: { panel?: string; row?: number; col?: number }[],
 ) {
-  let cols = 0;
-  let rows = 0;
+  let minRow = Infinity;
+  let minCol = Infinity;
+  let maxRow = -Infinity;
+  let maxCol = -Infinity;
   let count = 0;
+
   bookmarksList.forEach((bm) => {
     if (bm.panel !== "full-screen-panel") return;
     count += 1;
-    if (typeof bm.col === "number") cols = Math.max(cols, bm.col + 1);
-    if (typeof bm.row === "number") rows = Math.max(rows, bm.row + 1);
+    const row = typeof bm.row === "number" ? bm.row : 0;
+    const col = typeof bm.col === "number" ? bm.col : 0;
+    minRow = Math.min(minRow, row);
+    minCol = Math.min(minCol, col);
+    maxRow = Math.max(maxRow, row);
+    maxCol = Math.max(maxCol, col);
   });
-  return { cols, rows, count };
+
+  if (count === 0) {
+    return { minRow: 0, minCol: 0, maxRow: 0, maxCol: 0, cols: 0, rows: 0, count: 0 };
+  }
+  return {
+    minRow,
+    minCol,
+    maxRow,
+    maxCol,
+    cols: maxCol - minCol + 1,
+    rows: maxRow - minRow + 1,
+    count,
+  };
+}
+
+/** One page, in cells, for the reference screen at the current dial size. */
+export function pageSize(
+  referenceCell: number,
+  base: { width: number; height: number } = BASE_PAGE,
+  padding = VIEWPORT_PADDING,
+) {
+  return {
+    cols: fitCount(base.width - padding * 2, referenceCell),
+    rows: fitCount(base.height - padding * 2, referenceCell),
+  };
+}
+
+export interface CanvasPlan {
+  /** Rendered grid size, in cells. */
+  cols: number;
+  rows: number;
+  /** stored coordinate + offset = rendered coordinate. */
+  offsetX: number;
+  offsetY: number;
+  /** Rendered cell size in px, and the transform that produces it. */
+  cell: number;
+  scale: number;
+  /** Whole pages the desk currently spans. */
+  pagesX: number;
+  pagesY: number;
+  /** True when the desk is larger than the window and has to scroll. */
+  overflow: boolean;
+  /** Which regime produced this plan — useful for tests and for the UI. */
+  mode: "pages" | "cropped";
+}
+
+export interface ResolveCanvasOptions {
+  content: { cols: number; rows: number; minRow: number; minCol: number };
+  availableWidth: number;
+  availableHeight: number;
+  logicalCell: number;
+  /** Maximum cell size from the dial-size setting; may be Infinity. */
+  capCell: number;
+  /** Cell size at which shrinking stops and the desk starts scrolling. */
+  minCell?: number;
+  anchor?: DeskAnchor;
+  /** Reference screen defining one page. */
+  base?: { width: number; height: number };
+  /** Explicit canvas set by the user; bypasses the page/crop logic entirely. */
+  fixed?: { cols: number; rows: number } | null;
+  squareDials?: boolean;
 }
 
 /**
- * Picks the canvas to use the first time the grid is shown: as many whole cells
- * at the current dial size as the viewport comfortably holds, but never smaller
- * than what already-placed bookmarks occupy.
+ * Works out the desk to render: how many cells, where the content sits inside
+ * them, and how much to zoom.
  */
-export function captureCanvas(
-  availableWidth: number,
-  availableHeight: number,
-  referenceCell: number,
-  placed: { panel?: string; row?: number; col?: number }[],
-) {
-  const gap = referenceCell * GAP_RATIO;
-  const step = referenceCell + gap;
+export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
+  const {
+    content,
+    availableWidth,
+    availableHeight,
+    logicalCell,
+    capCell,
+    minCell = DEFAULT_MIN_CELL,
+    anchor = "center",
+    base = BASE_PAGE,
+    fixed = null,
+    squareDials = false,
+  } = options;
 
-  let cols = Math.max(1, Math.floor((availableWidth + gap) / step));
-  let rows = Math.max(1, Math.floor((availableHeight + gap) / step));
+  const reference = referenceCellSize(capCell, squareDials);
+  const page = pageSize(reference, base);
+  const contentCols = Math.max(1, content.cols);
+  const contentRows = Math.max(1, content.rows);
 
-  const extent = occupiedExtent(placed);
-  cols = Math.max(cols, extent.cols);
-  rows = Math.max(rows, extent.rows);
-  while (cols * rows < extent.count) rows += 1;
+  let cols: number;
+  let rows: number;
+  let pagesX = 1;
+  let pagesY = 1;
+  let mode: CanvasPlan["mode"] = "pages";
 
-  return { cols, rows };
+  if (fixed) {
+    cols = Math.max(1, fixed.cols);
+    rows = Math.max(1, fixed.rows);
+  } else {
+    // One page's worth of desk, in px, at the reference cell size.
+    const pagePx = canvasPixelSize(page.cols, page.rows, reference);
+    const fitsAPage =
+      availableWidth >= pagePx.width && availableHeight >= pagePx.height;
+
+    if (fitsAPage) {
+      // At or above the base screen: whole pages only. Extra width or height
+      // becomes another page of desk rather than dead margin. Rounding (rather
+      // than flooring) means a 34" screen gets its second page and simply zooms
+      // out a touch, instead of wasting most of it.
+      pagesX = Math.max(1, Math.round(availableWidth / pagePx.width));
+      pagesY = Math.max(1, Math.round(availableHeight / pagePx.height));
+      cols = page.cols * pagesX;
+      rows = page.rows * pagesY;
+    } else {
+      // Below the base screen: crop empty trailing columns and rows away before
+      // shrinking anything, but always leave one empty margin cell.
+      mode = "cropped";
+      cols = clamp(fitCount(availableWidth, reference), contentCols + 1, page.cols);
+      rows = clamp(fitCount(availableHeight, reference), contentRows + 1, page.rows);
+    }
+  }
+
+  // Zoom the resulting desk to fit, never magnifying past the dial-size cap.
+  const logical = canvasPixelSize(cols, rows, logicalCell);
+  const capScale = capCell / logicalCell;
+  let scale = Math.min(
+    availableWidth / logical.width,
+    availableHeight / logical.height,
+    capScale,
+  );
+
+  // Stop shrinking at the minimum cell size; below that the desk scrolls rather
+  // than becoming too small to use.
+  const minScale = minCell / logicalCell;
+  let overflow = false;
+  if (scale < minScale) {
+    scale = minScale;
+    overflow = true;
+  }
+  scale = Math.max(scale, 0.001);
+
+  // `|| 0` collapses -0, which is arithmetically fine but leaks into equality
+  // checks and snapshots as a distinct value.
+  const offsetX =
+    (anchor === "center"
+      ? Math.floor((cols - contentCols) / 2) - content.minCol
+      : -content.minCol) || 0;
+  const offsetY =
+    (anchor === "center"
+      ? Math.floor((rows - contentRows) / 2) - content.minRow
+      : -content.minRow) || 0;
+
+  return {
+    cols,
+    rows,
+    offsetX,
+    offsetY,
+    cell: logicalCell * scale,
+    scale,
+    pagesX,
+    pagesY,
+    overflow,
+    mode,
+  };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(Math.max(min, max), value));
+}
+
+/**
+ * Shifts full-screen coordinates so the smallest row and column are zero.
+ * Dropping an icon onto a page to the left of the content can produce negative
+ * coordinates; re-basing keeps storage non-negative without moving anything
+ * relative to anything else.
+ */
+export function normalizeFullScreenCoords<
+  T extends { panel?: string; row?: number; col?: number },
+>(list: T[]): T[] {
+  const extent = contentExtent(list);
+  if (extent.count === 0) return list;
+  if (extent.minRow === 0 && extent.minCol === 0) return list;
+
+  return list.map((bm) =>
+    bm.panel === "full-screen-panel"
+      ? {
+          ...bm,
+          row: (typeof bm.row === "number" ? bm.row : 0) - extent.minRow,
+          col: (typeof bm.col === "number" ? bm.col : 0) - extent.minCol,
+        }
+      : bm,
+  );
 }
