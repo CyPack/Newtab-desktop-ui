@@ -346,3 +346,34 @@ yerleşim (21×11 @ 77.6px) DEĞİŞMEDİ.
 | 320×480 | 11×5 | 0.52 | **22.58** | no | same |
 
 Hiçbir ekranda kaydırma/kırpma yok · dizilim 12/12 birebir aynı · konsol hatası yok.
+
+### Demo verisi — TETRIS DESENİ (2026-07-30, kullanıcı: "farklı köşelere, tetris gibi")
+`mockBookmarks` 11 → **24 uygulama** (13 yeni; thumbnail YOK → `Dial` renkli kutu + baş harf
+fallback'i, `Dial/index.tsx:640`). `mockBookmarks/demoLayout.ts` **(YENİ)** başlangıç desenini verir:
+
+```
+sol üst   O bloğu (0,0)(0,1)(1,0)(1,1)      sağ üst  L bloğu (0,19)(1,19)(2,19)(2,20)
+sol alt   T bloğu (9,1)(10,0)(10,1)(10,2)   sağ alt  S bloğu (9,19)(9,20)(10,18)(10,19)
+orta      I çubuğu (4,10)(5,10)(6,10)(7,10) tekler   (2,5)(7,4)(3,15)(8,14)
+```
+Amaç: düz bir sıra layout hatalarını GİZLER (herhangi bir kural tek satırı makul gösterir).
+Asimetrik desen, kolon reflow / yanlış kenar kırpma / tutarsız offset'i anında görünür kılar.
+
+⚠️ Desen dışı öğeler (dev-only "Top Sites" klasörleri) **deterministik boş hücreye** atanır
+(tarama (5,2)'den başlar). Atanmazsa aynı hücreye düşüp renderer'ın son-çare yerleştirmesine
+giderler — o da masa boyutuna bağlı olduğu için **desen ekrandan ekrana DEĞİŞİR** (yaşandı).
+
+### İki bug daha (bu sırada bulundu ve düzeltildi)
+1. **İlk yerleşim çöpe gidiyordu:** `savedPanelBookmarks.length === 0` dalında hesaplanan
+   `organized` state'e yazılıyor ama altındaki senkron bloğu hâlâ ESKİ (boş) diziyi kullanıyordu
+   → her bookmark "yeni" sayılıp sıralı yeniden yerleştiriliyordu. `savedPanelBookmarks = organized`
+   eklendi. (Yan etki: dev-only klasörler artık düzgün kalıcı → demo 24 değil 26 tile.)
+2. **"+1 boş kenar" kuralı sayfayı taşırıyordu:** içerik sayfayı tam doldurduğunda
+   `content+1` masa boyutunu page'in üstüne çıkarıyordu (21×11 sayfa → 22×12 masa).
+   Kullanıcının 3. kuralı geçerli: boş kolon/row yoksa frame olduğu gibi kabul edilir.
+   `min(content+1, page)` ile düzeltildi; içerik sayfadan büyükse masa yine içeriği kapsar.
+
+**Tetris deseniyle canlı ölçüm (12 ekran):** 57"→3 sayfa(63×22, 70.9px) · 34"→2(42×11, 71.2px) ·
+27"/24"→1(21×11, 77.6px) · MBA1440→21×11@58.8 · 1366→55.7 · 1280→52.1 · 1024→41.3 · 800→31.9 ·
+412→15.6 · 390→14.7 · 320→**11.8px**. Dizilim 12/12 birebir aynı · scroll/kırpma yok · konsol temiz.
+62 test PASS · build yeşil · tsc 34 = baseline.

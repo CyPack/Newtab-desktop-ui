@@ -234,10 +234,20 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
       rows = page.rows * pagesY;
     } else {
       // Below the base screen: crop empty trailing columns and rows away before
-      // shrinking anything, but always leave one empty margin cell.
+      // shrinking anything, leaving one empty margin cell where there is room
+      // for one. When the content already fills the page there is nothing left
+      // to crop and no room for the margin, so the frame is taken as it stands.
       mode = "cropped";
-      cols = clamp(fitCount(availableWidth, reference), contentCols + 1, page.cols);
-      rows = clamp(fitCount(availableHeight, reference), contentRows + 1, page.rows);
+      cols = clamp(
+        fitCount(availableWidth, reference),
+        Math.max(contentCols, Math.min(contentCols + 1, page.cols)),
+        Math.max(page.cols, contentCols),
+      );
+      rows = clamp(
+        fitCount(availableHeight, reference),
+        Math.max(contentRows, Math.min(contentRows + 1, page.rows)),
+        Math.max(page.rows, contentRows),
+      );
     }
   }
 

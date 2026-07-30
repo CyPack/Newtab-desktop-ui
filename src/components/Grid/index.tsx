@@ -7,6 +7,7 @@ import { contrastRatio } from "random-color-library";
 import { getImageAverageColor } from "#lib/imageLuminance";
 import { settings } from "#stores/useSettings";
 import { bookmarks } from "#stores/useBookmarks";
+import { applyDemoLayout } from "#stores/useBookmarks/mockBookmarks/demoLayout";
 import { modals } from "#stores/useModals";
 import { Dial } from "./Dial";
 import { SettingsGear } from "./SettingsGear";
@@ -866,19 +867,31 @@ export const Grid = observer(function Grid() {
           );
 
           if (currentFolderBookmarks.length > 0) {
-            const organized = organizeBookmarksForLayout(currentFolderBookmarks.map((bm: any) => ({
+            let organized = organizeBookmarksForLayout(currentFolderBookmarks.map((bm: any) => ({
               ...bm,
               name: bm.title || bm.name,
               title: bm.title || bm.name,
               url: bm.url ? normalizeUrl(bm.url) : bm.url,
               isPanelBookmark: true,
             })), settings.gridLayout);
-            
+
+            // Demo mode starts from a deliberately awkward arrangement rather
+            // than a tidy row, so layout regressions are visible at a glance.
+            // Compiled out of the real extension builds.
+            if (__DEMO__ && settings.gridLayout === "full-screen") {
+              organized = applyDemoLayout(organized);
+            }
+
             setPanelBookmarks(organized);
             savePanelBookmarks(organized);
+            // Carry the freshly organised layout into the sync pass below.
+            // Without this it keeps working from the empty list it loaded a
+            // moment ago, treats every bookmark as new, and re-places them all
+            // sequentially — silently discarding the arrangement just built.
+            savedPanelBookmarks = organized;
             setLastOrganizedLayout(settings.gridLayout);
             setHasOrganizedForLayout(true);
-            
+
             try {
               localStorage.setItem(ORGANIZED_LAYOUT_KEY, settings.gridLayout);
               localStorage.setItem(HAS_ORGANIZED_KEY, "true");

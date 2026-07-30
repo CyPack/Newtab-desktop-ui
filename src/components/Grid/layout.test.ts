@@ -196,6 +196,24 @@ describe("cropping: below the base screen", () => {
     expect(p.rows).toBeLessThanOrEqual(page.rows);
   });
 
+  it("takes the frame as it stands when the content fills the whole page", () => {
+    // Nothing left to crop and no room for a margin: the desk must not swell
+    // past a page just to satisfy the one-empty-cell rule.
+    const page = pageSize(CAP);
+    const full = { cols: page.cols, rows: page.rows, minRow: 0, minCol: 0 };
+    const p = plan(1440, 900, { content: full });
+    expect(p.cols).toBe(page.cols);
+    expect(p.rows).toBe(page.rows);
+  });
+
+  it("still contains content that is larger than a page", () => {
+    const page = pageSize(CAP);
+    const oversized = { cols: page.cols + 6, rows: page.rows + 3, minRow: 0, minCol: 0 };
+    const p = plan(1440, 900, { content: oversized });
+    expect(p.cols).toBeGreaterThanOrEqual(oversized.cols);
+    expect(p.rows).toBeGreaterThanOrEqual(oversized.rows);
+  });
+
   it("only zooms out once cropping has run out", () => {
     // A wide content block leaves nothing to crop, so a small screen must zoom.
     const wide = { cols: 18, rows: 8, minRow: 0, minCol: 0 };
