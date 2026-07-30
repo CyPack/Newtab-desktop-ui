@@ -435,3 +435,62 @@ Sürüklenen ikon `opacity .35` ile soluklaşır (göz sürükleme görüntüsü
 - **swap** uçtan uca: A↔B yer değiştirdi, diğer 24 ikon 0 hareket
 - sayfa/ölçek garantileri korundu: 12 ekranda dizilim aynı, scroll yok
 - 63 test PASS · build yeşil · tsc **34 = baseline**
+
+---
+
+## 🧭 BÖLGE GENİŞLETME (territory expansion) — 2026-07-30
+
+**Şikâyet:** "sabit varsayılan box'lar 24 inch'e optimize; ekranı değişik şekillere sokunca
+ÖLÜ / kullanışsız bölgeler oluşuyor. Ölü bölgelerde bile grid olacak ve ölçekleme EN DIŞ
+KÖŞEDEKİ İKONA göre referans alınacak." + "oyunlardaki alan genişletme gibi düşün."
+
+### İki şey AYRIŞTIRILDI (kritik)
+```
+GRID  → PENCEREYİ DOLDURUR. Ekran hangi şekildeyse (dikey monitör, 57" ultrawide,
+        esnetilmiş panel) hücreler kenardan kenara. Bırakılamayan bölge YOK.
+ÖLÇEK → yalnız AKTİF ALANDAN gelir = ikonların erişim kutusu (maxCol+1 × maxRow+1).
+        Ötesindeki boş grid BEDAVA — köşedeki 3 ikon 57"'te de tam boyutta kalır.
+```
+Boş grid'e ikon koy → kutu ona ulaşacak kadar büyür → **aradaki alan aktifleşir** ve masa
+yeniden ölçeklenir. Dial-size hâlâ TAVAN, taban YOK.
+
+### Yüksek-su işareti + serbest bırakma
+- Aktif alan oturum içinde **yalnız BÜYÜR** (`activeAreaRef`) → ikonu geri alınca düzenleme
+  ortasında her şey birden büyümez.
+- **Yeniden yüklemede** `loadPanelBookmarks` koordinatları başlangıca **re-base eder**
+  (`normalizeFullScreenCoords`) → ulaşılmayan alan tekrar ölü olur. Kullanıcının C kuralı.
+- ⚠️ Re-base HER MUTASYONDA yapılamaz: en üstteki ikonu aşağı taşıyınca tüm dizilim yukarı
+  fırlar. Mutasyonda yalnız **negatif koordinat** güvenlik ağı çalışır.
+
+### Neden `active` == `reach` (tek girdi)
+Ölçeği sınır kutusundan alıp grid'i mutlak (0,0)'dan çizmek, ikonlar soldan/üstten boşluk
+bırakınca kutu ile erişimi ayrıştırıyordu → grid taşıyor, köşe ikonu **ekran dışında** kalıyordu
+(canlı probda yakalandı). Yüklemede re-base sayesinde kutu = erişim; belirsizlik yok.
+
+### ⛔ EMEKLİ: tam-sayfa yuvarlaması
+`pagesX = round(availW/pageW)` ya sağda ölü şerit bırakıyor ya zorla zoom-out ettiriyordu —
+"ölü bölge olmasın" kuralıyla doğrudan çelişiyor. `cols = fitCount(availW, cell)` ile değişti.
+`basePageWidth/Height` yalnız **boş masanın varsayılan aktif alanı** olarak kaldı (24" → 21×11).
+
+### Ayrıca düzeltildi
+**Sürükleme sırasında plan dondurma KALDIRILDI.** `dragend` gelmezse (iptal, pencere dışı bırakma)
+bayrak takılı kalıyor ve plan KALICI donuyordu — canlı probda yakalandı: pencere 2560→600'e
+küçültülmesine rağmen hücre 77.6px'te kalıp masa ekran dışına taştı. Yeni modelde dondurma zaten
+gereksiz (aktif alan yalnız bırakma anında değişir).
+
+### Canlı doğrulama
+**A · ölü bölge** — 8 ekran şekli, kapsanmayan alan en kötü **0.95 hücre** (bir hücreden az):
+57" 57×24 · 34" 38×15 · 24" 21×11 · dikey 11×21 · dar panel 10×27 · geniş şerit 26×5 ·
+kare 10×10 · telefon 10×22. Grid her şekilde ekranı dolduruyor.
+
+**B+C · bölge genişletme döngüsü**
+
+| adım | grid | hücre | erişim | |
+|---|---|---|---|---|
+| başlangıç 2560×1440 | 28×15 | 77.6px | 2,9 | |
+| köşeyi al | 28×15 | 77.6px | **14,27** | bölge iddia edildi |
+| 1024×768'e geç | 28×20 | **30.96px** | 14,27 | köşe görünür kalsın diye küçüldü |
+| ikonu geri getir | 28×20 | **30.96px** | 2,9 | aynı oturum → tutuldu, sıçrama yok |
+| **yeniden yükle** | **11×8** | **77.6px** | 2,9 | **ALAN SERBEST** |
+
+58 test PASS · build yeşil · tsc **34 = baseline** · konsol hatası yok.

@@ -1,35 +1,29 @@
 /**
- * Page-based layout maths for the full-screen grid.
+ * Layout maths for the full-screen desk.
  *
- * The desktop is measured in PAGES. One page is the cell grid that fits a
- * reference screen — a 24" monitor, 1920x1080 CSS px by default — at the
- * current dial size. That page is the unit everything is optimised around.
+ * Two things are kept deliberately separate.
  *
- *   at or above one page   the desk is a whole number of pages. Extra screen
- *                          area to the right or below becomes another page of
- *                          desk rather than wasted margin, and icons stay at
- *                          their capped size. On a 34" or 57" monitor you get
- *                          two or three pages side by side, read as one desk.
+ *   THE GRID    fills the window. Whatever shape the screen is — a vertical
+ *               monitor, a 57" ultrawide, a stretched browser panel — cells are
+ *               laid out edge to edge, so there is no region you cannot drop an
+ *               icon into. Nothing is letterboxed away as dead space.
  *
- *   below one page         empty trailing columns and rows are cropped away
- *                          first, down to a single empty one, before anything
- *                          shrinks. Only once the content plus that one empty
- *                          margin still doesn't fit does the whole thing zoom
- *                          out — and it will zoom as far as it needs to. There
- *                          is deliberately no lower bound: on a laptop, on a
- *                          MacBook, on a phone, the same arrangement is always
- *                          fully visible, however small that makes the icons.
+ *   THE SCALE   comes from the ACTIVE AREA: the bounding box of the icons. Empty
+ *               grid beyond that box costs nothing, so a handful of icons in one
+ *               corner stay full size no matter how large the screen is.
  *
- * Throughout, the content block itself is RIGID: icons never rearrange relative
- * to each other. Only the empty desk around them, and the zoom, respond to the
- * screen.
+ * Put an icon out into the empty grid and the box grows to reach it — the space
+ * in between becomes part of the active area, and the whole desk rescales so it
+ * still fits. This is territory expansion: the outermost icon defines how far
+ * the desk reaches, in both directions, and the UI is sized to that.
  *
- * Note what is deliberately absent: nothing here shifts icons to keep them
- * centred. An earlier version centred the content's bounding box inside the
- * desk, which meant dragging one icon outward re-centred every other icon —
- * direct manipulation moved things the user hadn't touched. A stored cell is
- * now simply a cell on the desk, and centring is done by placing the whole desk
- * in the window (see the desk anchor), which no single icon can influence.
+ * The box only ever grows within a session (see the caller's high-water mark),
+ * so tidying icons back inward doesn't make everything jump larger mid-edit.
+ * A fresh load measures the icons again, and space no longer reached by any of
+ * them goes back to being inactive.
+ *
+ * The dial size still caps how large a cell may get, and there is no lower
+ * bound, so the active area is always fully visible however small that makes it.
  *
  * Everything here is pure — no DOM, no store — so these promises are testable.
  */
@@ -169,19 +163,21 @@ export interface CanvasPlan {
   /** Rendered cell size in px, and the transform that produces it. */
   cell: number;
   scale: number;
-  /** Whole pages the desk currently spans. */
+  /** How many base pages' worth of desk this is, for display purposes. */
   pagesX: number;
   pagesY: number;
-  /** Which regime produced this plan — useful for tests and for the UI. */
-  mode: "pages" | "cropped";
+  /** True while the cap is what limits the cell size, rather than the screen. */
+  atCapSize: boolean;
 }
 
 export interface ResolveCanvasOptions {
   /**
-   * How far the icons reach from the origin, in cells — `maxCol + 1` by
-   * `maxRow + 1`. Used only as a floor, so the desk always contains them.
+   * The active area: how far the icons reach from the origin, in cells. This is
+   * what the desk is scaled to fit, and the only thing the icons influence.
+   * Coordinates are re-based to the origin on load, so this is also the size of
+   * their bounding box — there is no daylight between the two to get wrong.
    */
-  content: { cols: number; rows: number };
+  active: { cols: number; rows: number };
   availableWidth: number;
   availableHeight: number;
   logicalCell: number;
@@ -195,12 +191,25 @@ export interface ResolveCanvasOptions {
 }
 
 /**
- * Works out the desk to render: how many cells, where the content sits inside
- * them, and how much to zoom.
+ * Largest cell size at which a `cols` x `rows` block fits the available area.
+ */
+export function cellSizeThatFits(
+  cols: number,
+  rows: number,
+  availableWidth: number,
+  availableHeight: number,
+) {
+  const byWidth = availableWidth / (cols + (cols - 1) * GAP_RATIO);
+  const byHeight = availableHeight / (rows + (rows - 1) * GAP_RATIO);
+  return Math.max(0.001, Math.min(byWidth, byHeight));
+}
+
+/**
+ * Works out the desk to render: how large a cell is, and how many of them fit.
  */
 export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
   const {
-    content,
+    active,
     availableWidth,
     availableHeight,
     logicalCell,
@@ -212,83 +221,50 @@ export function resolveCanvas(options: ResolveCanvasOptions): CanvasPlan {
 
   const reference = referenceCellSize(capCell, squareDials);
   const page = pageSize(reference, base);
-  const contentCols = Math.max(1, content.cols);
-  const contentRows = Math.max(1, content.rows);
 
+  // The active area drives the zoom. An empty desk has no bounding box, so it
+  // falls back to the base page — which is what keeps a fresh install looking
+  // the way it does on the reference screen.
+  const activeCols = Math.max(1, active.cols || page.cols);
+  const activeRows = Math.max(1, active.rows || page.rows);
+
+  let cell: number;
   let cols: number;
   let rows: number;
-  let pagesX = 1;
-  let pagesY = 1;
-  let mode: CanvasPlan["mode"] = "pages";
 
   if (fixed) {
     cols = Math.max(1, fixed.cols);
     rows = Math.max(1, fixed.rows);
+    cell = Math.min(
+      capCell,
+      cellSizeThatFits(cols, rows, availableWidth, availableHeight),
+    );
   } else {
-    // One page's worth of desk, in px, at the reference cell size.
-    const pagePx = canvasPixelSize(page.cols, page.rows, reference);
-    const fitsAPage =
-      availableWidth >= pagePx.width && availableHeight >= pagePx.height;
+    // Scale so the active area fits, never magnifying past the dial-size cap
+    // and never stopping short of fitting: no lower bound at all.
+    cell = Math.min(
+      capCell,
+      cellSizeThatFits(activeCols, activeRows, availableWidth, availableHeight),
+    );
 
-    if (fitsAPage) {
-      // At or above the base screen: whole pages only. Extra width or height
-      // becomes another page of desk rather than dead margin. Rounding (rather
-      // than flooring) means a 34" screen gets its second page and simply zooms
-      // out a touch, instead of wasting most of it.
-      pagesX = Math.max(1, Math.round(availableWidth / pagePx.width));
-      pagesY = Math.max(1, Math.round(availableHeight / pagePx.height));
-      cols = page.cols * pagesX;
-      rows = page.rows * pagesY;
-    } else {
-      // Below the base screen: crop empty trailing columns and rows away before
-      // shrinking anything, leaving one empty margin cell where there is room
-      // for one. When the content already fills the page there is nothing left
-      // to crop and no room for the margin, so the frame is taken as it stands.
-      mode = "cropped";
-      cols = clamp(
-        fitCount(availableWidth, reference),
-        Math.max(contentCols, Math.min(contentCols + 1, page.cols)),
-        Math.max(page.cols, contentCols),
-      );
-      rows = clamp(
-        fitCount(availableHeight, reference),
-        Math.max(contentRows, Math.min(contentRows + 1, page.rows)),
-        Math.max(page.rows, contentRows),
-      );
-    }
-
-    // Whatever the regime decided, the desk must contain every icon.
-    cols = Math.max(cols, contentCols);
-    rows = Math.max(rows, contentRows);
+    // Then fill the window with cells of that size. This is what removes dead
+    // regions: the grid takes the screen's shape, not the base page's.
+    cols = Math.max(fitCount(availableWidth, cell), activeCols);
+    rows = Math.max(fitCount(availableHeight, cell), activeRows);
   }
 
-  // Zoom the resulting desk to fit. Capped above by the dial-size setting, and
-  // deliberately unbounded below: the whole desk is always visible, at whatever
-  // size that takes. The tiny floor is only there to keep the maths finite.
-  const logical = canvasPixelSize(cols, rows, logicalCell);
-  const capScale = capCell / logicalCell;
-  const scale = Math.max(
-    0.001,
-    Math.min(
-      availableWidth / logical.width,
-      availableHeight / logical.height,
-      capScale,
-    ),
-  );
+  cell = Math.max(0.001, cell);
+  const scale = cell / logicalCell;
 
   return {
     cols,
     rows,
-    cell: logicalCell * scale,
+    cell,
     scale,
-    pagesX,
-    pagesY,
-    mode,
+    pagesX: page.cols > 0 ? cols / page.cols : 1,
+    pagesY: page.rows > 0 ? rows / page.rows : 1,
+    atCapSize: Number.isFinite(capCell) && cell >= capCell - 1e-6,
   };
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(Math.max(min, max), value));
 }
 
 /**

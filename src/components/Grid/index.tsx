@@ -82,7 +82,11 @@ function loadPanelBookmarks(): any[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       console.log('Loaded panel bookmarks:', parsed.length, 'items');
-      return Array.isArray(parsed) ? parsed : [];
+      // Re-based to the origin on the way in. Empty rows and columns the
+      // arrangement had drifted away from are released here: that is what makes
+      // area claimed in an earlier session go inactive again, and what keeps
+      // the active area equal to the icons' bounding box.
+      return Array.isArray(parsed) ? normalizeFullScreenCoords(parsed) : [];
     }
     
     // Backup storage attempt
@@ -219,7 +223,7 @@ export const Grid = observer(function Grid() {
     scale: 1,
     pagesX: 1,
     pagesY: 1,
-    mode: "pages",
+    atCapSize: false,
   }));
 
   // Where the icon being dragged would land, and what dropping there would do.
@@ -229,16 +233,12 @@ export const Grid = observer(function Grid() {
     col: number;
     intent: "move" | "swap" | "folder";
   } | null>(null);
-  // The desk must not re-plan mid-drag: a grid that resizes under the pointer
-  // makes the drop land somewhere other than where it was aimed.
-  const isDraggingRef = useRef(false);
-  const recalculatePlanRef = useRef<(() => void) | null>(null);
-  // The desk is re-cropped when the WINDOW changes, not when the icons do.
-  // Cropping is content-derived by design, so without this the desk would
-  // breathe on every drag: place an icon one column further out and everything
-  // shrinks a little, pull it back and everything grows again. Sticky sizing
-  // keeps it still while the user is arranging things.
-  const lastViewportRef = useRef({ width: 0, height: 0 });
+  // The active area — the icons' bounding box — is what the desk is scaled to
+  // fit. It is a HIGH-WATER MARK for the life of this page: placing an icon out
+  // in the empty grid expands it immediately, but tidying icons back inward
+  // does not contract it, so the desk doesn't jump larger mid-edit. A fresh
+  // load measures the icons again, and space nothing reaches goes inactive.
+  const activeAreaRef = useRef({ cols: 0, rows: 0 });
 
   const canvas = useMemo(
     () => ({ cols: plan.cols, rows: plan.rows }),
@@ -275,10 +275,15 @@ export const Grid = observer(function Grid() {
 
   const updatePanelBookmarksWithSave = useCallback((updater: (current: any[]) => any[]) => {
     setPanelBookmarks((current) => {
-      // Dropping onto a page left of or above the content yields negative
-      // coordinates; re-base them so storage stays non-negative. This shifts
-      // every icon by the same amount, so nothing moves relative to anything.
-      const next = normalizeFullScreenCoords(updater(current));
+      // Only a safety net here: re-basing on every edit would yank the whole
+      // arrangement up the moment the topmost icon was moved down. Releasing
+      // unused space is a load-time job (see loadPanelBookmarks).
+      const updated = updater(current);
+      const bounds = contentExtent(updated);
+      const next =
+        bounds.count > 0 && (bounds.minRow < 0 || bounds.minCol < 0)
+          ? normalizeFullScreenCoords(updated)
+          : updated;
 
       // Save only if we're in root and data actually changed
       if (isRootSafe && JSON.stringify(current) !== JSON.stringify(next)) {
@@ -346,7 +351,6 @@ export const Grid = observer(function Grid() {
   // is cropped away before any icon shrinks. See Grid/layout.ts.
   const recalculatePlan = useCallback(() => {
     if (settings.gridLayout !== "full-screen") return;
-    if (isDraggingRef.current) return;
 
     const { availableWidth, availableHeight } = measureGridArea(
       bottomFullGridRef.current,
@@ -354,15 +358,17 @@ export const Grid = observer(function Grid() {
     if (availableWidth <= 0 || availableHeight <= 0) return;
 
     const extent = contentExtent(panelBookmarks);
-    const viewportChanged =
-      lastViewportRef.current.width !== availableWidth ||
-      lastViewportRef.current.height !== availableHeight;
-    lastViewportRef.current = { width: availableWidth, height: availableHeight };
+    if (extent.count > 0) {
+      activeAreaRef.current = {
+        cols: Math.max(activeAreaRef.current.cols, extent.maxCol + 1),
+        rows: Math.max(activeAreaRef.current.rows, extent.maxRow + 1),
+      };
+    }
 
     const options = {
-      // How far icons reach from the origin — a floor for the desk, never a
-      // shrink-wrap. This is what keeps one icon's move from moving the rest.
-      content: { cols: extent.maxCol + 1, rows: extent.maxRow + 1 },
+      // Bounding box of the icons: the only thing they influence, and only by
+      // way of the zoom. Their cells are never shifted.
+      active: activeAreaRef.current,
       availableWidth,
       availableHeight,
       logicalCell: logicalCellSize(settings.squareDials as boolean),
@@ -383,18 +389,7 @@ export const Grid = observer(function Grid() {
       squareDials: settings.squareDials as boolean,
     };
 
-    let next = resolveCanvas(options);
-    if (!viewportChanged) {
-      // Same window: hold the desk at least as large as it already is, so
-      // rearranging icons can grow it but never shrink it under the pointer.
-      const held = {
-        cols: Math.max(next.cols, planRef.current.cols),
-        rows: Math.max(next.rows, planRef.current.rows),
-      };
-      if (held.cols !== next.cols || held.rows !== next.rows) {
-        next = resolveCanvas({ ...options, fixed: held });
-      }
-    }
+    const next = resolveCanvas(options);
 
     // Ignore imperceptible churn so a ResizeObserver storm can't loop.
     setPlan((prev) =>
@@ -567,7 +562,6 @@ export const Grid = observer(function Grid() {
 
   // Effects
   useEffect(() => {
-    recalculatePlanRef.current = recalculatePlan;
     recalculatePlan();
 
     const gridEl = bottomFullGridRef.current;
@@ -1305,7 +1299,6 @@ useEffect(() => {
         } catch {}
       }
 
-      isDraggingRef.current = true;
       addBreadcrumbListeners();
     },
     []
@@ -1321,9 +1314,6 @@ useEffect(() => {
     clearAllDragStyles();
     setDropTarget(null);
     draggedRef.current = null;
-    // Re-plan now that the desk is free to change again.
-    isDraggingRef.current = false;
-    recalculatePlanRef.current?.();
   }, [clearAllDragStyles]);
 
   // Folder operations

@@ -4,6 +4,7 @@ import {
   BASE_PAGE,
   GAP_RATIO,
   canvasPixelSize,
+  cellSizeThatFits,
   contentExtent,
   fitCount,
   logicalCellSize,
@@ -14,285 +15,243 @@ import {
 } from "./layout";
 
 /**
- * Two promises are under test.
+ * Three promises are under test.
  *
- * 1. The content block is rigid: icons never move relative to each other, at
- *    any screen size, in any regime.
- * 2. The desk is measured in pages: a bigger screen buys more desk rather than
- *    bigger icons, and a smaller screen spends empty margin before it spends
- *    icon size.
+ * 1. The grid fills the window, whatever shape the window is, so there is no
+ *    region you cannot drop an icon into.
+ * 2. The scale comes from the active area — the icons' bounding box — and from
+ *    nothing else. Empty grid beyond it is free.
+ * 3. Reaching out into that empty grid expands the active area and rescales the
+ *    desk, without ever changing the spacing between icons.
  */
 
 const LOGICAL_CELL = logicalCellSize(false);
 const CAP = maxCellSize("tiny", false, true, 1.6); // 12.125 * 0.4 * 16 = 77.6
-/** Icons reaching 4 columns by 2 rows from the origin. */
-const CONTENT = { cols: 4, rows: 2 };
+const PADDING = 40; // the viewport's 20px on each side
 
-function plan(width: number, height: number, overrides = {}) {
+interface PlanArgs {
+  active?: { cols: number; rows: number };
+  capCell?: number;
+  fixed?: { cols: number; rows: number } | null;
+}
+
+function plan(width: number, height: number, args: PlanArgs = {}) {
+  const active = args.active ?? { cols: 4, rows: 2 };
   return resolveCanvas({
-    content: CONTENT,
-    availableWidth: width - 40, // the viewport's 20px padding on each side
-    availableHeight: height - 40,
+    active,
+    availableWidth: width - PADDING,
+    availableHeight: height - PADDING,
     logicalCell: LOGICAL_CELL,
-    capCell: CAP,
-    ...overrides,
+    capCell: args.capCell ?? CAP,
+    fixed: args.fixed ?? null,
   });
 }
 
-describe("moving one icon never disturbs the others", () => {
-  const SCREENS = [
-    { name: "57in ultrawide", width: 5120, height: 2160 },
-    { name: "34in ultrawide", width: 3440, height: 1440 },
-    { name: "24in base", width: 1920, height: 1080 },
-    { name: "MacBook", width: 1512, height: 945 },
-    { name: "laptop", width: 1366, height: 768 },
-    { name: "small window", width: 800, height: 600 },
-    { name: "phone width", width: 412, height: 915 },
-    { name: "tiny", width: 320, height: 480 },
-  ];
+const SHAPES = [
+  { name: "57in ultrawide", width: 5120, height: 2160 },
+  { name: "34in ultrawide", width: 3440, height: 1440 },
+  { name: "24in base", width: 1920, height: 1080 },
+  { name: "vertical monitor", width: 1080, height: 1920 },
+  { name: "tall narrow panel", width: 600, height: 1600 },
+  { name: "short wide panel", width: 2400, height: 500 },
+  { name: "MacBook", width: 1512, height: 945 },
+  { name: "square window", width: 900, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+];
 
-  it("does not render a stored cell anywhere but that cell", () => {
-    // The regression this guards: the desk used to be shrink-wrapped around the
-    // content's bounding box and the content re-centred inside it, so dragging
-    // one icon two cells to the right shifted every other icon one cell left.
-    // A plan no longer carries any offset at all — there is nothing to shift.
-    SCREENS.forEach((screen) => {
-      const p = plan(screen.width, screen.height);
-      expect(Object.keys(p), `plan on ${screen.name}`).not.toContain("offsetX");
-      expect(Object.keys(p), `plan on ${screen.name}`).not.toContain("offsetY");
+describe("the grid fills the window, whatever shape it is", () => {
+  it("leaves no dead region on any aspect ratio", () => {
+    SHAPES.forEach((shape) => {
+      const p = plan(shape.width, shape.height);
+      const size = canvasPixelSize(p.cols, p.rows, p.cell);
+      // Whatever is left over is smaller than one more cell would need — i.e.
+      // the remainder is only the part of a cell that could not fit.
+      const spareX = shape.width - PADDING - size.width;
+      const spareY = shape.height - PADDING - size.height;
+      expect(spareX, `horizontal dead space on ${shape.name}`).toBeLessThan(
+        p.cell * (1 + GAP_RATIO),
+      );
+      expect(spareY, `vertical dead space on ${shape.name}`).toBeLessThan(
+        p.cell * (1 + GAP_RATIO),
+      );
     });
   });
 
-  it("ignores where the icons sit entirely, at or above the base screen", () => {
-    // Above the base screen the desk is whole pages, so nothing about the
-    // arrangement can influence it.
+  it("takes the screen's shape rather than the base page's", () => {
+    const vertical = plan(1080, 1920);
+    expect(vertical.rows).toBeGreaterThan(vertical.cols);
+
+    const wide = plan(5120, 1440);
+    expect(wide.cols / wide.rows).toBeGreaterThan(3);
+  });
+
+  it("never renders fewer cells than the icons reach", () => {
+    SHAPES.forEach((shape) => {
+      [1, 8, 25, 60].forEach((n) => {
+        const p = plan(shape.width, shape.height, {
+          active: { cols: n, rows: n },
+        });
+        expect(p.cols, `${n} on ${shape.name}`).toBeGreaterThanOrEqual(n);
+        expect(p.rows, `${n} on ${shape.name}`).toBeGreaterThanOrEqual(n);
+      });
+    });
+  });
+});
+
+describe("the scale comes from the active area alone", () => {
+  it("keeps icons at full size when a few sit in one corner of a big screen", () => {
     [
-      { name: "24in", width: 1920, height: 1080 },
-      { name: "34in", width: 3440, height: 1440 },
       { name: "57in", width: 5120, height: 2160 },
-    ].forEach((screen) => {
-      const reference = plan(screen.width, screen.height, {
-        content: { cols: 1, rows: 1 },
-      });
-      for (let cols = 1; cols <= reference.cols; cols++) {
-        const p = plan(screen.width, screen.height, { content: { cols, rows: 1 } });
-        expect(p.cols, `${cols} wide on ${screen.name}`).toBe(reference.cols);
-        expect(p.cell, `${cols} wide on ${screen.name}`).toBeCloseTo(reference.cell, 10);
-      }
+      { name: "34in", width: 3440, height: 1440 },
+      { name: "24in", width: 1920, height: 1080 },
+      { name: "vertical", width: 1080, height: 1920 },
+    ].forEach((shape) => {
+      const p = plan(shape.width, shape.height, { active: { cols: 3, rows: 2 } });
+      expect(p.cell, `cell on ${shape.name}`).toBeCloseTo(CAP, 6);
+      expect(p.atCapSize).toBe(true);
     });
   });
 
-  it("never shrinks the desk as the icons spread out", () => {
-    // Monotonic in the content: growth is possible (an icon has to stay
-    // visible), shrinking back is not, so the desk cannot oscillate.
-    SCREENS.forEach((screen) => {
-      let previous = 0;
-      for (let cols = 1; cols <= 30; cols++) {
-        const p = plan(screen.width, screen.height, { content: { cols, rows: 1 } });
-        expect(p.cols, `${cols} wide on ${screen.name}`).toBeGreaterThanOrEqual(previous);
-        previous = p.cols;
-      }
+  it("ignores empty grid entirely — only the bounding box counts", () => {
+    const small = plan(900, 900, { active: { cols: 4, rows: 4 } });
+    const huge = plan(5120, 2160, { active: { cols: 4, rows: 4 } });
+    expect(huge.cell).toBeCloseTo(small.cell, 6);
+    // ...but the larger screen offers far more cells to place things in.
+    expect(huge.cols).toBeGreaterThan(small.cols);
+  });
+
+  it("shrinks the desk once the active area outgrows the screen", () => {
+    const modest = plan(1512, 945, { active: { cols: 6, rows: 4 } });
+    const sprawling = plan(1512, 945, {
+      active: { cols: 40, rows: 4 },
     });
+    expect(sprawling.cell).toBeLessThan(modest.cell);
+    expect(sprawling.cols).toBeGreaterThanOrEqual(40);
   });
 
-  it("grows the desk when an icon is placed beyond its edge", () => {
-    const before = plan(1366, 768, { content: { cols: 4, rows: 2 } });
-    const beyond = plan(1366, 768, { content: { cols: before.cols + 5, rows: 2 } });
-    expect(beyond.cols).toBeGreaterThanOrEqual(before.cols + 5);
-  });
-
-  it("always contains every icon", () => {
-    SCREENS.forEach((screen) => {
-      [1, 5, 12, 30, 60].forEach((cols) => {
-        const p = plan(screen.width, screen.height, { content: { cols, rows: 4 } });
-        expect(p.cols, `${cols} on ${screen.name}`).toBeGreaterThanOrEqual(cols);
-        expect(p.rows, `${cols} on ${screen.name}`).toBeGreaterThanOrEqual(4);
-      });
-    });
-  });
-
-  it("keeps the gap-to-cell ratio constant so spacing scales with the icons", () => {
-    SCREENS.forEach((screen) => {
-      const p = plan(screen.width, screen.height);
-      expect((p.cell * GAP_RATIO) / p.cell).toBeCloseTo(GAP_RATIO, 10);
-    });
-  });
-});
-
-describe("pages: at or above the base screen", () => {
-  it("treats the 24in base screen as exactly one page", () => {
-    const p = plan(BASE_PAGE.width, BASE_PAGE.height);
-    expect(p.mode).toBe("pages");
-    expect(p.pagesX).toBe(1);
-    expect(p.pagesY).toBe(1);
-    const page = pageSize(CAP);
-    expect(p.cols).toBe(page.cols);
-    expect(p.rows).toBe(page.rows);
-  });
-
-  it("buys extra pages of desk on wide monitors instead of wasting the space", () => {
-    const base = plan(BASE_PAGE.width, BASE_PAGE.height);
-    const ultrawide34 = plan(3440, 1440);
-    const ultrawide57 = plan(5120, 2160);
-
-    expect(ultrawide34.pagesX).toBe(2);
-    expect(ultrawide57.pagesX).toBe(3);
-    expect(ultrawide34.cols).toBe(base.cols * 2);
-    expect(ultrawide57.cols).toBe(base.cols * 3);
-    // More desk, not bigger icons.
-    expect(ultrawide57.cell).toBeLessThanOrEqual(CAP + 1e-9);
-  });
-
-  it("adds a second page vertically when the screen is tall enough", () => {
-    const p = plan(1920, 2160);
-    expect(p.pagesY).toBe(2);
-    expect(p.rows).toBe(pageSize(CAP).rows * 2);
-  });
-
-  it("always renders a whole number of pages", () => {
-    [1920, 2560, 3440, 3840, 5120].forEach((width) => {
-      const p = plan(width, 1440);
-      const page = pageSize(CAP);
-      expect(p.cols % page.cols, `whole pages at ${width}px`).toBe(0);
-    });
-  });
-
-  it("never shrinks icons below the cap while whole pages still fit", () => {
-    const p = plan(1920, 1080);
-    expect(p.cell).toBeCloseTo(CAP, 6);
-  });
-});
-
-describe("cropping: below the base screen", () => {
-  it("spends empty margin before it spends icon size", () => {
-    const base = plan(BASE_PAGE.width, BASE_PAGE.height);
-    const smaller = plan(1366, 768);
-
-    expect(smaller.mode).toBe("cropped");
-    expect(smaller.cols).toBeLessThan(base.cols); // desk cropped
-    expect(smaller.cell).toBeCloseTo(CAP, 6); // icons untouched
-  });
-
-  it("never crops below the content plus one empty row and column", () => {
+  it("scales so the active area always fits, with no lower bound", () => {
     [
-      { width: 800, height: 600 },
-      { width: 412, height: 915 },
+      { width: 390, height: 844 },
       { width: 320, height: 480 },
       { width: 200, height: 200 },
     ].forEach((screen) => {
-      const p = plan(screen.width, screen.height);
-      expect(p.cols, `cols at ${screen.width}`).toBeGreaterThanOrEqual(CONTENT.cols + 1);
-      expect(p.rows, `rows at ${screen.width}`).toBeGreaterThanOrEqual(CONTENT.rows + 1);
+      const p = plan(screen.width, screen.height, {
+        active: { cols: 40, rows: 25 },
+      });
+      const needed = canvasPixelSize(40, 25, p.cell);
+      expect(needed.width).toBeLessThanOrEqual(screen.width - PADDING + 1e-6);
+      expect(needed.height).toBeLessThanOrEqual(screen.height - PADDING + 1e-6);
+      expect(p.cell).toBeGreaterThan(0);
     });
   });
 
-  it("never crops beyond a single page", () => {
+  it("falls back to the base page when nothing is placed yet", () => {
+    const empty = plan(BASE_PAGE.width, BASE_PAGE.height, {
+      active: { cols: 0, rows: 0 },
+    });
     const page = pageSize(CAP);
-    const p = plan(1600, 900);
-    expect(p.cols).toBeLessThanOrEqual(page.cols);
-    expect(p.rows).toBeLessThanOrEqual(page.rows);
-  });
-
-  it("takes the frame as it stands when the content fills the whole page", () => {
-    // Nothing left to crop and no room for a margin: the desk must not swell
-    // past a page just to satisfy the one-empty-cell rule.
-    const page = pageSize(CAP);
-    const full = { cols: page.cols, rows: page.rows };
-    const p = plan(1440, 900, { content: full });
-    expect(p.cols).toBe(page.cols);
-    expect(p.rows).toBe(page.rows);
-  });
-
-  it("still contains content that is larger than a page", () => {
-    const page = pageSize(CAP);
-    const oversized = { cols: page.cols + 6, rows: page.rows + 3 };
-    const p = plan(1440, 900, { content: oversized });
-    expect(p.cols).toBeGreaterThanOrEqual(oversized.cols);
-    expect(p.rows).toBeGreaterThanOrEqual(oversized.rows);
-  });
-
-  it("only zooms out once cropping has run out", () => {
-    // A wide content block leaves nothing to crop, so a small screen must zoom.
-    const wide = { cols: 18, rows: 8 };
-    const p = plan(800, 600, { content: wide });
-    expect(p.cell).toBeLessThan(CAP);
+    expect(empty.cols).toBe(page.cols);
+    expect(empty.rows).toBe(page.rows);
+    expect(empty.cell).toBeCloseTo(CAP, 6);
   });
 });
 
-describe("there is no lower bound on icon size", () => {
-  // The whole arrangement must stay visible on a phone, a MacBook, anything.
-  const SMALL = [
-    { name: "MacBook Air", width: 1440, height: 900 },
-    { name: "small window", width: 800, height: 600 },
-    { name: "phone portrait", width: 412, height: 915 },
-    { name: "small phone", width: 320, height: 480 },
-    { name: "absurd", width: 200, height: 200 },
-  ];
+describe("territory expansion", () => {
+  const SCREEN = { width: 1512, height: 945 };
 
-  it("always shrinks enough to fit the whole desk on screen", () => {
-    const crowded = { cols: 40, rows: 20 };
-    SMALL.forEach((screen) => {
-      const p = plan(screen.width, screen.height, { content: crowded });
-      const { width, height } = canvasPixelSize(p.cols, p.rows, p.cell);
-      expect(width, `width on ${screen.name}`).toBeLessThanOrEqual(
-        screen.width - 40 + 1e-6,
-      );
-      expect(height, `height on ${screen.name}`).toBeLessThanOrEqual(
-        screen.height - 40 + 1e-6,
-      );
+  it("rescales the desk when an icon reaches further out", () => {
+    const before = plan(SCREEN.width, SCREEN.height, {
+      active: { cols: 6, rows: 4 },
     });
-  });
-
-  it("lets the cell go well below any icon-sized floor when it has to", () => {
-    const crowded = { cols: 40, rows: 20 };
-    const p = plan(320, 480, { content: crowded });
-    expect(p.cell).toBeGreaterThan(0);
-    expect(p.cell).toBeLessThan(20);
-  });
-
-  it("keeps every icon inside the desk even at the smallest sizes", () => {
-    const crowded = { cols: 40, rows: 20 };
-    SMALL.forEach((screen) => {
-      const p = plan(screen.width, screen.height, { content: crowded });
-      expect(p.cols, `cols on ${screen.name}`).toBeGreaterThanOrEqual(crowded.cols);
-      expect(p.rows, `rows on ${screen.name}`).toBeGreaterThanOrEqual(crowded.rows);
+    const after = plan(SCREEN.width, SCREEN.height, {
+      active: { cols: 30, rows: 4 },
     });
-  });
-});
-
-describe("an explicit canvas overrides the page logic", () => {
-  it("uses exactly the columns and rows it was given", () => {
-    const p = plan(1920, 1080, { fixed: { cols: 14, rows: 7 } });
-    expect(p.cols).toBe(14);
-    expect(p.rows).toBe(7);
+    expect(after.cell).toBeLessThan(before.cell);
+    expect(after.cols).toBeGreaterThan(before.cols);
   });
 
-  it("still keeps the same canvas on every screen", () => {
-    const fixed = { cols: 14, rows: 7 };
+  it("expands vertically and horizontally independently", () => {
+    const wider = plan(SCREEN.width, SCREEN.height, {
+      active: { cols: 30, rows: 4 },
+    });
+    const taller = plan(SCREEN.width, SCREEN.height, {
+      active: { cols: 6, rows: 18 },
+    });
+    expect(wider.cols).toBeGreaterThanOrEqual(30);
+    expect(taller.rows).toBeGreaterThanOrEqual(18);
+  });
+
+  it("expands to the corner in both directions at once", () => {
+    const corner = plan(SCREEN.width, SCREEN.height, {
+      active: { cols: 24, rows: 14 },
+    });
+    const needed = canvasPixelSize(24, 14, corner.cell);
+    expect(needed.width).toBeLessThanOrEqual(SCREEN.width - PADDING + 1e-6);
+    expect(needed.height).toBeLessThanOrEqual(SCREEN.height - PADDING + 1e-6);
+    expect(corner.cols).toBeGreaterThanOrEqual(24);
+    expect(corner.rows).toBeGreaterThanOrEqual(14);
+  });
+
+  it("changes only the zoom, never the spacing between icons", () => {
     [
-      [5120, 2160],
-      [1920, 1080],
-      [800, 600],
-      [320, 480],
-    ].forEach(([w, h]) => {
-      const p = plan(w, h, { fixed });
-      expect(p.cols).toBe(14);
-      expect(p.rows).toBe(7);
+      { cols: 6, rows: 4 },
+      { cols: 20, rows: 4 },
+      { cols: 45, rows: 20 },
+    ].forEach((active) => {
+      const p = plan(SCREEN.width, SCREEN.height, { active });
+      expect((p.cell * GAP_RATIO) / p.cell).toBeCloseTo(GAP_RATIO, 10);
     });
+  });
+
+  it("is monotonic: a larger active area never means a larger cell", () => {
+    let previous = Infinity;
+    for (let cols = 1; cols <= 50; cols++) {
+      const p = plan(SCREEN.width, SCREEN.height, {
+        active: { cols, rows: 3 },
+      });
+      expect(p.cell, `${cols} columns`).toBeLessThanOrEqual(previous + 1e-9);
+      previous = p.cell;
+    }
   });
 });
 
-describe("dial size acts as a maximum only", () => {
-  it("caps growth but imposes no minimum of its own", () => {
+describe("dial size caps growth but imposes no floor", () => {
+  it("never magnifies past the cap", () => {
+    SHAPES.forEach((shape) => {
+      const p = plan(shape.width, shape.height, { active: { cols: 1, rows: 1 } });
+      expect(p.cell, `cell on ${shape.name}`).toBeLessThanOrEqual(CAP + 1e-9);
+    });
+  });
+
+  it("reports the different dial sizes correctly", () => {
     expect(maxCellSize("scale", false, false, 1.6)).toBe(Infinity);
     expect(maxCellSize("scale", false, true, 2.5)).toBeCloseTo(12.125 * 2.5 * 16, 10);
     expect(maxCellSize("tiny", true, true, 1.6)).toBeCloseTo(10.25 * 0.4 * 16, 10);
   });
 
-  it("still produces a sane page when the limit is switched off", () => {
+  it("still produces a finite desk when the cap is switched off", () => {
     const p = plan(1920, 1080, { capCell: Infinity });
-    expect(p.cols).toBeGreaterThan(0);
     expect(Number.isFinite(p.cell)).toBe(true);
+    expect(p.cols).toBeGreaterThan(0);
+    expect(p.atCapSize).toBe(false);
+  });
+});
+
+describe("an explicit fixed desk overrides all of it", () => {
+  it("uses exactly the columns and rows it was given, on every screen", () => {
+    const fixed = { cols: 14, rows: 7 };
+    SHAPES.forEach((shape) => {
+      const p = plan(shape.width, shape.height, { fixed });
+      expect(p.cols, `cols on ${shape.name}`).toBe(14);
+      expect(p.rows, `rows on ${shape.name}`).toBe(7);
+    });
+  });
+
+  it("still fits that desk on screen", () => {
+    const p = plan(800, 600, { fixed: { cols: 14, rows: 7 } });
+    const size = canvasPixelSize(14, 7, p.cell);
+    expect(size.width).toBeLessThanOrEqual(800 - PADDING + 1e-6);
+    expect(size.height).toBeLessThanOrEqual(600 - PADDING + 1e-6);
   });
 });
 
@@ -321,8 +280,7 @@ describe("content extent and coordinate normalisation", () => {
     const after = normalizeFullScreenCoords(before);
     expect(after[0]).toMatchObject({ row: 0, col: 0 });
     expect(after[1]).toMatchObject({ row: 3, col: 4 });
-    expect(after[2]).toEqual(before[2]); // other panels untouched
-    // Spacing preserved exactly.
+    expect(after[2]).toEqual(before[2]);
     expect(after[1].row! - after[0].row!).toBe(before[1].row! - before[0].row!);
     expect(after[1].col! - after[0].col!).toBe(before[1].col! - before[0].col!);
   });
@@ -333,14 +291,23 @@ describe("content extent and coordinate normalisation", () => {
   });
 });
 
-describe("fitCount", () => {
-  it("accounts for the gaps between cells", () => {
-    // 3 cells of 100px with 14px gaps = 328px
-    expect(fitCount(328, 100)).toBe(3);
+describe("cell arithmetic", () => {
+  it("fitCount accounts for the gaps between cells", () => {
+    expect(fitCount(328, 100)).toBe(3); // 3 cells of 100 + 2 gaps of 14
     expect(fitCount(327, 100)).toBe(2);
+    expect(fitCount(1, 100)).toBe(1);
   });
 
-  it("never returns less than one", () => {
-    expect(fitCount(1, 100)).toBe(1);
+  it("cellSizeThatFits is the inverse of that", () => {
+    const cell = cellSizeThatFits(3, 1, 328, 1000);
+    expect(cell).toBeCloseTo(100, 6);
+    expect(fitCount(328, cell)).toBe(3);
+  });
+
+  it("is limited by whichever axis is tighter", () => {
+    expect(cellSizeThatFits(4, 4, 400, 1000)).toBeCloseTo(
+      cellSizeThatFits(4, 4, 400, 400),
+      6,
+    );
   });
 });
